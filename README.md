@@ -19,20 +19,9 @@ It is built for Dockerized OTBR deployments, including Home Assistant + OTBR + M
 - Docker Compose deployment with `.env` configuration
 - No external frontend CDN or hosted service dependency
 
-## Creator
+## Maintainer
 
-Created by Arvis Skrējāns <arvis.skrejans@gmail.com>.
-
-Copyright (C) 2026 Arvis Skrējāns <arvis.skrejans@gmail.com>.
-
-## Screenshots
-
-Suggested screenshot paths:
-
-```text
-docs/screenshot-dashboard.png
-docs/screenshot-traffic.png
-```
+Arvis Skrējāns <arvis.skrejans@gmail.com>
 
 ## How It Works
 
