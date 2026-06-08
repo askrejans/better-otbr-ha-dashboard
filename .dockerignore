@@ -1,0 +1,8 @@
+.env
+thread-dashboard
+better-otbr-ha-dashboard
+.git
+.gitignore
+README.md
+config/aliases.json
+empty-ha-storage

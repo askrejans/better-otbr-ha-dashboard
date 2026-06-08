@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Better OTBR HA Dashboard</title>
+  <link rel="stylesheet" href="/style.css?v=20260608-4">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <h1>Better OTBR HA Dashboard</h1>
+      <div id="subtitle" class="subtitle">Loading OTBR state...</div>
+    </div>
+    <div class="top-actions">
+      <div id="livebar" class="live"><span id="live-dot"></span><span id="live-text">Connecting</span></div>
+      <button id="refresh" type="button">Refresh</button>
+      <button id="fit" type="button">Fit</button>
+      <label class="toggle"><input id="auto" type="checkbox" checked><span>Live</span></label>
+    </div>
+  </header>
+
+  <main class="shell">
+    <section class="graph-panel">
+      <div class="graph-toolbar">
+        <div class="legend">
+          <span><i class="swatch direct"></i> Direct</span>
+          <span><i class="swatch relay"></i> Relay</span>
+          <span><i class="swatch observed"></i> Observed</span>
+          <span><i class="swatch anchor"></i> Retained</span>
+        </div>
+        <div id="graph-summary" class="graph-summary">-</div>
+      </div>
+      <svg id="graph" role="img" aria-label="Thread network graph"></svg>
+      <div id="tooltip" hidden></div>
+    </section>
+
+    <aside class="sidebar">
+      <section class="panel stats">
+        <div class="panel-head"><h2>Status</h2></div>
+        <div class="stat-grid">
+          <div><span>State</span><strong id="state">-</strong></div>
+          <div><span>Routers</span><strong id="routers">-</strong></div>
+          <div><span>Children</span><strong id="children">-</strong></div>
+          <div><span>Weak</span><strong id="weak">-</strong></div>
+          <div><span>MAC Rx</span><strong id="macrx">-</strong></div>
+          <div><span>MAC Tx</span><strong id="mactx">-</strong></div>
+          <div><span>IP Rx</span><strong id="iprx">-</strong></div>
+          <div><span>IP Tx</span><strong id="iptx">-</strong></div>
+        </div>
+      </section>
+
+      <section class="panel selected-panel">
+        <div class="panel-head"><h2>Selected</h2></div>
+        <div id="selected" class="muted">Click a node.</div>
+      </section>
+
+      <section class="panel traffic-panel">
+        <div class="panel-head split">
+          <h2>Traffic</h2>
+          <div class="traffic-actions">
+            <button id="traffic-pause" type="button">Pause</button>
+            <button id="traffic-clear" type="button">Clear</button>
+          </div>
+        </div>
+        <div class="traffic-filter">
+          <input id="traffic-search" type="search" placeholder="Filter path, protocol, device">
+          <select id="traffic-direction">
+            <option value="all">All</option>
+            <option value="rx">Into OTBR</option>
+            <option value="tx">From OTBR</option>
+          </select>
+        </div>
+        <div id="traffic-note" class="note">Border traffic is measured at OTBR. Multi-hop paths are inferred from Thread route and diagnostics data.</div>
+        <div id="traffic-count" class="traffic-count muted">0 events</div>
+        <div id="traffic" class="traffic-list"></div>
+      </section>
+
+      <section class="panel warnings-panel">
+        <div class="panel-head"><h2>Warnings</h2></div>
+        <ul id="warnings" class="list"></ul>
+      </section>
+
+      <section class="panel matter-panel">
+        <div class="panel-head"><h2>Matter Names</h2></div>
+        <div id="matter" class="matter-list"></div>
+      </section>
+    </aside>
+  </main>
+
+  <details class="raw"><summary>Raw diagnostics</summary><pre id="raw"></pre></details>
+  <script src="/app.js?v=20260608-4"></script>
+</body>
+</html>

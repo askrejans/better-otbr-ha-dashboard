@@ -1,0 +1,10 @@
+{
+  "nodes": {
+    "0x5000": "OTBR",
+    "0011223344556677": "Example Thread device"
+  },
+  "notes": {
+    "0x5006": "Example note for a weak signal device"
+  },
+  "sticky": {}
+}

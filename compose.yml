@@ -1,0 +1,28 @@
+services:
+  better-otbr-ha-dashboard:
+    build: .
+    container_name: ${CONTAINER_NAME:-better-otbr-ha-dashboard}
+    network_mode: ${NETWORK_MODE:-host}
+    restart: unless-stopped
+    environment:
+      - LISTEN_ADDR=${LISTEN_ADDR:-:8888}
+      - OTBR_REST_URL=${OTBR_REST_URL:-http://127.0.0.1:8981}
+      - OTBR_CONTAINER=${OTBR_CONTAINER:-otbr}
+      - HA_STORAGE=${HA_STORAGE:-/ha-storage}
+      - MATTER_DATA=${MATTER_DATA:-/matter-data}
+      - MATTER_WS_URL=${MATTER_WS_URL:-ws://127.0.0.1:5580/ws}
+      - MATTER_IP_TTL=${MATTER_IP_TTL:-10m}
+      - TOPOLOGY_LINK_TTL=${TOPOLOGY_LINK_TTL:-5m}
+      - ALIAS_FILE=${ALIAS_FILE:-/config/aliases.json}
+      - POLL_INTERVAL=${POLL_INTERVAL:-1s}
+      - DOCKER_SOCKET=${DOCKER_SOCKET:-/var/run/docker.sock}
+    volumes:
+      - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock:ro
+      - ${HA_STORAGE_HOST:-./empty-ha-storage}:${HA_STORAGE:-/ha-storage}:ro
+      - ${MATTER_DATA_HOST:-./empty-matter-data}:${MATTER_DATA:-/matter-data}:ro
+      - ./config:/config
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

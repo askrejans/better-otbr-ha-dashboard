@@ -1,0 +1,5 @@
+.env
+config/aliases.json
+thread-dashboard
+better-otbr-ha-dashboard
+.DS_Store
