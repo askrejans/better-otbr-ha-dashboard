@@ -30,4 +30,4 @@ The copyright holders may grant separate written permission for AI or machine-le
 
 These terms are intended as additional terms alongside GPLv3. They are not intended to remove any warranty disclaimers, liability limitations, source-code availability requirements, copyright notices, attribution notices, or copyleft requirements in GPLv3.
 
-Because restrictions on AI training may be treated as additional use restrictions, this combined licensing may not be considered standard GPLv3-only or OSI-approved open-source licensing. Obtain legal review before publishing or relying on this license model.
+This project is offered only under GPLv3 together with these Additional Terms unless a separate written license is granted by the copyright holder.

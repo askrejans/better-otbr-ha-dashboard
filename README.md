@@ -317,9 +317,8 @@ The frontend is static HTML/CSS/JS under `static/`.
 
 ## License
 
-This project is licensed under GNU GPLv3 with additional no-AI-training terms.
+This project is distributed under the GNU General Public License version 3.0 with Additional Terms prohibiting use for AI/ML training.
 
-- Standard GPLv3 text: `LICENSE`
-- Additional terms and AI-training restriction: `LICENSE-ADDITIONAL-TERMS.md`
-
-This combined license model includes restrictions beyond standard GPLv3 and may not be considered OSI-approved open-source licensing. Obtain legal review before publishing or relying on this license model.
+- `LICENSE`: GNU GPLv3 license text
+- `LICENSE-ADDITIONAL-TERMS.md`: Additional Terms, including the no-AI-training restriction
+- `NOTICE`: copyright, creator, and license summary
