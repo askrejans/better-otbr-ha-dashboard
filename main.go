@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log"
 	"net"
@@ -25,21 +26,33 @@ import (
 )
 
 type Config struct {
-	ListenAddr    string
-	OTBRRestURL   string
-	OTBRContainer string
-	HAStorage     string
-	MatterData    string
-	MatterWSURL   string
-	AliasFile     string
-	PollInterval  time.Duration
-	MatterIPTTL   time.Duration
-	TopologyTTL   time.Duration
-	DockerSocket  string
+	ListenAddr          string
+	OTBRRestURL         string
+	OTBRContainer       string
+	HAStorage           string
+	MatterData          string
+	MatterWSURL         string
+	AliasFile           string
+	PollInterval        time.Duration
+	SlowPollInterval    time.Duration
+	IdlePollInterval    time.Duration
+	MatterIPTTL         time.Duration
+	TopologyTTL         time.Duration
+	TopologyNodeTTL     time.Duration
+	MetadataCacheTTL    time.Duration
+	NodeCacheTTL        time.Duration
+	DockerSocket        string
+	IncludeRaw          bool
+	IncludeCounters     bool
+	EnableTraffic       bool
+	TrafficHistoryLimit int
+	LogRefreshTiming    bool
 }
 
 type Snapshot struct {
 	GeneratedAt   time.Time         `json:"generatedAt"`
+	Version       string            `json:"version"`
+	Config        SnapshotConfig    `json:"config"`
 	Network       *NodeInfo         `json:"network,omitempty"`
 	Summary       Summary           `json:"summary"`
 	Nodes         []GraphNode       `json:"nodes"`
@@ -47,8 +60,21 @@ type Snapshot struct {
 	Traffic       []TrafficEvent    `json:"traffic"`
 	MatterDevices []MatterDevice    `json:"matterDevices"`
 	Counters      map[string]any    `json:"counters"`
+	Fresh         SnapshotFreshness `json:"fresh"`
 	Warnings      []string          `json:"warnings"`
 	Raw           map[string]string `json:"raw,omitempty"`
+}
+
+type SnapshotConfig struct {
+	PollIntervalMS      int64 `json:"pollIntervalMs"`
+	TrafficHistoryLimit int   `json:"trafficHistoryLimit"`
+	TrafficEnabled      bool  `json:"trafficEnabled"`
+}
+
+type SnapshotFreshness struct {
+	MACCounters bool `json:"macCounters"`
+	IPCounters  bool `json:"ipCounters"`
+	Traffic     bool `json:"traffic"`
 }
 
 type Summary struct {
@@ -95,6 +121,8 @@ type GraphNode struct {
 	Alias         bool   `json:"alias"`
 	MatterGuess   string `json:"matterGuess,omitempty"`
 	LinkStatus    string `json:"linkStatus,omitempty"`
+	Retained      bool   `json:"retained,omitempty"`
+	LastSeenAgo   int    `json:"lastSeenAgo,omitempty"`
 }
 
 type GraphLink struct {
@@ -155,16 +183,89 @@ type AliasConfig struct {
 }
 
 type Server struct {
-	cfg         Config
-	mu          sync.RWMutex
-	ss          Snapshot
-	matterMu    sync.Mutex
-	matterIPs   map[string]string
-	matterIPsAt time.Time
-	linkMu      sync.Mutex
-	stickyLinks map[string]cachedLink
-	nodeMu      sync.Mutex
-	stickyNodes map[string]cachedNode
+	cfg           Config
+	mu            sync.RWMutex
+	ss            Snapshot
+	refreshMu     sync.Mutex
+	refreshFunc   func(context.Context) error
+	eventMu       sync.Mutex
+	subscribers   map[chan Snapshot]struct{}
+	activeViewers int
+	metaMu        sync.Mutex
+	metaCache     metadataCache
+	nodeMu        sync.Mutex
+	nodeCache     nodeInfoCache
+	matterMu      sync.Mutex
+	matterIPs     map[string]string
+	matterIPsAt   time.Time
+	linkMu        sync.Mutex
+	stickyLinks   map[string]cachedLink
+	stickyNodeMu  sync.Mutex
+	stickyNodes   map[string]cachedNode
+	refreshState  refreshState
+	wakeRefresh   chan struct{}
+}
+
+type metadataCache struct {
+	aliases aliasCache
+	matter  matterDeviceCache
+	files   matterFileCache
+}
+
+type nodeInfoCache struct {
+	checked time.Time
+	value   *NodeInfo
+	err     error
+}
+
+type refreshState struct {
+	raw           map[string]string
+	matterFiles   []matterFile
+	routerHints   map[string]RouterHint
+	matterLinks   []GraphLink
+	lastSlow      time.Time
+	lastTraffic   time.Time
+	lastVersion   string
+	lastTimingLog time.Time
+}
+
+type aliasCache struct {
+	path    string
+	sig     fileSig
+	checked time.Time
+	value   AliasConfig
+}
+
+type matterDeviceCache struct {
+	path    string
+	sig     fileSig
+	checked time.Time
+	value   []MatterDevice
+}
+
+type matterFileCache struct {
+	dir     string
+	sig     string
+	checked time.Time
+	files   []matterFile
+}
+
+type matterFile struct {
+	path string
+	data []byte
+}
+
+type fileSig struct {
+	exists  bool
+	size    int64
+	modTime time.Time
+}
+
+var dockerClients sync.Map
+
+type commandSpec struct {
+	name string
+	args []string
 }
 
 type cachedLink struct {
@@ -179,7 +280,7 @@ type cachedNode struct {
 
 func main() {
 	cfg := loadConfig()
-	s := &Server{cfg: cfg}
+	s := NewServer(cfg)
 	if err := s.refresh(context.Background()); err != nil {
 		log.Printf("initial refresh failed: %v", err)
 	}
@@ -195,28 +296,71 @@ func main() {
 }
 
 func loadConfig() Config {
-	interval, err := time.ParseDuration(env("POLL_INTERVAL", "1s"))
-	if err != nil {
-		interval = time.Second
+	interval := durationEnv("POLL_INTERVAL", 10*time.Second)
+	if interval < 2*time.Second {
+		interval = 2 * time.Second
+	}
+	slowInterval := durationEnv("SLOW_POLL_INTERVAL", 60*time.Second)
+	if slowInterval < interval {
+		slowInterval = interval
+	}
+	idleInterval := durationEnv("IDLE_POLL_INTERVAL", 60*time.Second)
+	if idleInterval < interval {
+		idleInterval = interval
 	}
 	return Config{
-		ListenAddr:    env("LISTEN_ADDR", ":8888"),
-		OTBRRestURL:   strings.TrimRight(env("OTBR_REST_URL", "http://127.0.0.1:8981"), "/"),
-		OTBRContainer: env("OTBR_CONTAINER", "otbr"),
-		HAStorage:     env("HA_STORAGE", "/ha-storage"),
-		MatterData:    env("MATTER_DATA", "/matter-data"),
-		MatterWSURL:   env("MATTER_WS_URL", "ws://127.0.0.1:5580/ws"),
-		AliasFile:     env("ALIAS_FILE", "/config/aliases.json"),
-		PollInterval:  interval,
-		MatterIPTTL:   durationEnv("MATTER_IP_TTL", 10*time.Minute),
-		TopologyTTL:   durationEnv("TOPOLOGY_LINK_TTL", 5*time.Minute),
-		DockerSocket:  env("DOCKER_SOCKET", "/var/run/docker.sock"),
+		ListenAddr:          env("LISTEN_ADDR", ":8888"),
+		OTBRRestURL:         strings.TrimRight(env("OTBR_REST_URL", "http://127.0.0.1:8981"), "/"),
+		OTBRContainer:       env("OTBR_CONTAINER", "otbr"),
+		HAStorage:           env("HA_STORAGE", "/ha-storage"),
+		MatterData:          env("MATTER_DATA", "/matter-data"),
+		MatterWSURL:         env("MATTER_WS_URL", "ws://127.0.0.1:5580/ws"),
+		AliasFile:           env("ALIAS_FILE", "/config/aliases.json"),
+		PollInterval:        interval,
+		SlowPollInterval:    slowInterval,
+		IdlePollInterval:    idleInterval,
+		MatterIPTTL:         durationEnv("MATTER_IP_TTL", 10*time.Minute),
+		TopologyTTL:         durationEnv("TOPOLOGY_LINK_TTL", 5*time.Minute),
+		TopologyNodeTTL:     durationEnv("TOPOLOGY_NODE_TTL", 90*time.Second),
+		MetadataCacheTTL:    durationEnv("METADATA_CACHE_TTL", 30*time.Second),
+		NodeCacheTTL:        durationEnv("NODE_CACHE_TTL", 30*time.Second),
+		DockerSocket:        env("DOCKER_SOCKET", "/var/run/docker.sock"),
+		IncludeRaw:          boolEnv("INCLUDE_RAW", false),
+		IncludeCounters:     boolEnv("INCLUDE_COUNTERS", false),
+		EnableTraffic:       boolEnv("ENABLE_TRAFFIC", true),
+		TrafficHistoryLimit: intEnv("TRAFFIC_HISTORY_LIMIT", 2000),
+		LogRefreshTiming:    boolEnv("LOG_REFRESH_TIMING", true),
 	}
+}
+
+func NewServer(cfg Config) *Server {
+	return &Server{cfg: cfg, subscribers: map[chan Snapshot]struct{}{}, wakeRefresh: make(chan struct{}, 1)}
 }
 
 func durationEnv(k string, d time.Duration) time.Duration {
 	if v := os.Getenv(k); v != "" {
 		if parsed, err := time.ParseDuration(v); err == nil {
+			return parsed
+		}
+	}
+	return d
+}
+
+func boolEnv(k string, d bool) bool {
+	if v := os.Getenv(k); v != "" {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "1", "true", "yes", "on":
+			return true
+		case "0", "false", "no", "off":
+			return false
+		}
+	}
+	return d
+}
+
+func intEnv(k string, d int) int {
+	if v := os.Getenv(k); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
 			return parsed
 		}
 	}
@@ -231,13 +375,35 @@ func env(k, d string) string {
 }
 
 func (s *Server) loop() {
-	t := time.NewTicker(s.cfg.PollInterval)
-	defer t.Stop()
-	for range t.C {
+	for {
+		timer := time.NewTimer(s.nextRefreshInterval())
+		select {
+		case <-timer.C:
+		case <-s.wakeRefresh:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+		}
 		if err := s.refresh(context.Background()); err != nil {
 			log.Printf("refresh failed: %v", err)
 		}
 	}
+}
+
+func (s *Server) nextRefreshInterval() time.Duration {
+	if s.activeViewerCount() == 0 {
+		return s.cfg.IdlePollInterval
+	}
+	return s.cfg.PollInterval
+}
+
+func (s *Server) activeViewerCount() int {
+	s.eventMu.Lock()
+	defer s.eventMu.Unlock()
+	return s.activeViewers
 }
 
 func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
@@ -265,15 +431,57 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeEvent(w, flusher)
-	t := time.NewTicker(s.cfg.PollInterval)
-	defer t.Stop()
+	ch := s.subscribe()
+	defer s.unsubscribe(ch)
 	for {
 		select {
 		case <-r.Context().Done():
 			return
-		case <-t.C:
-			_ = s.refresh(r.Context())
+		case <-ch:
 			s.writeEvent(w, flusher)
+		}
+	}
+}
+
+func (s *Server) subscribe() chan Snapshot {
+	ch := make(chan Snapshot, 1)
+	wasIdle := false
+	s.eventMu.Lock()
+	wasIdle = s.activeViewers == 0
+	s.subscribers[ch] = struct{}{}
+	s.activeViewers++
+	s.eventMu.Unlock()
+	if wasIdle {
+		s.wakeLoop()
+	}
+	return ch
+}
+
+func (s *Server) unsubscribe(ch chan Snapshot) {
+	s.eventMu.Lock()
+	delete(s.subscribers, ch)
+	if s.activeViewers > 0 {
+		s.activeViewers--
+	}
+	close(ch)
+	s.eventMu.Unlock()
+	s.wakeLoop()
+}
+
+func (s *Server) wakeLoop() {
+	select {
+	case s.wakeRefresh <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Server) publish(ss Snapshot) {
+	s.eventMu.Lock()
+	defer s.eventMu.Unlock()
+	for ch := range s.subscribers {
+		select {
+		case ch <- ss:
+		default:
 		}
 	}
 }
@@ -295,51 +503,95 @@ func noCache(next http.Handler) http.Handler {
 }
 
 func (s *Server) refresh(ctx context.Context) error {
-	aliases := readAliases(s.cfg.AliasFile)
-	matter := readMatterDevices(s.cfg.HAStorage)
-	matter = s.enrichMatterIPs(ctx, matter)
-	routerHints := readRouterHints(s.cfg.MatterData, matter)
-	warnings := []string{}
-	raw := map[string]string{}
+	s.refreshMu.Lock()
+	defer s.refreshMu.Unlock()
+	if s.refreshFunc != nil {
+		return s.refreshFunc(ctx)
+	}
 
-	node, err := fetchNodeInfo(s.cfg.OTBRRestURL)
+	start := time.Now()
+	timing := map[string]time.Duration{}
+	mark := func(name string, since time.Time) {
+		timing[name] += time.Since(since)
+	}
+	now := time.Now()
+	slow := s.refreshState.lastSlow.IsZero() || now.Sub(s.refreshState.lastSlow) >= s.cfg.SlowPollInterval || len(s.refreshState.raw) == 0
+	trafficDue := s.cfg.EnableTraffic
+	if !s.cfg.EnableTraffic {
+		trafficDue = false
+	}
+
+	step := time.Now()
+	aliases := s.readAliasesCached(s.cfg.AliasFile)
+	matter := s.readMatterDevicesCached(s.cfg.HAStorage)
+	if slow {
+		matter = s.enrichMatterIPs(ctx, matter)
+	} else {
+		matter = s.applyCachedMatterIPs(matter)
+	}
+	mark("metadata", step)
+
+	warnings := []string{}
+	raw := cloneStringMap(s.refreshState.raw)
+
+	step = time.Now()
+	node, err := s.fetchNodeInfoCached(s.cfg.OTBRRestURL)
+	mark("rest", step)
 	if err != nil {
 		warnings = append(warnings, "OTBR REST /node failed: "+err.Error())
 	}
 
-	cmds := map[string][]string{
-		"state":       {"ot-ctl", "state"},
-		"neighbor":    {"ot-ctl", "neighbor", "table"},
-		"child":       {"ot-ctl", "child", "table"},
-		"mac":         {"ot-ctl", "counters", "mac"},
-		"ip":          {"ot-ctl", "counters", "ip"},
-		"netdata":     {"ot-ctl", "netdata", "show"},
-		"srpHosts":    {"ot-ctl", "srp", "server", "host"},
-		"topology":    {"ot-ctl", "history", "netinfo", "list"},
-		"routerTable": {"ot-ctl", "router", "table"},
-		"rx":          {"ot-ctl", "history", "rx", "list"},
-		"tx":          {"ot-ctl", "history", "tx", "list"},
-	}
-	for name, cmd := range cmds {
-		out, err := dockerExec(ctx, s.cfg.DockerSocket, s.cfg.OTBRContainer, cmd)
-		if err != nil {
-			warnings = append(warnings, name+" failed: "+err.Error())
-			continue
-		}
-		raw[name] = out
+	if slow {
+		step = time.Now()
+		matterFiles := s.readMatterFilesCached(s.cfg.MatterData)
+		s.refreshState.matterFiles = cloneMatterFiles(matterFiles)
+		s.refreshState.routerHints = parseRouterHints(matterFiles, matter)
+		s.refreshState.lastSlow = now
+		mark("matter", step)
 	}
 
+	step = time.Now()
+	freshRaw, warnings := s.runOTCtlCommands(ctx, warnings, slow, trafficDue)
+	for _, key := range attemptedOTCtlKeys(slow, trafficDue) {
+		delete(raw, key)
+	}
+	for k, v := range freshRaw {
+		raw[k] = v
+	}
+	if !s.cfg.EnableTraffic {
+		delete(raw, "rx")
+		delete(raw, "tx")
+	}
+	if trafficDue {
+		s.refreshState.lastTraffic = now
+	}
+	mark("otctl", step)
+
+	step = time.Now()
 	srpHosts := parseSRPHosts(raw["srpHosts"])
-	nodes, links, weak := buildGraph(node, raw["neighbor"], raw["child"], raw["topology"], raw["routerTable"], aliases, matter, routerHints, srpHosts)
+	nodes, links, weak := buildGraph(node, raw["neighbor"], raw["child"], raw["topology"], raw["routerTable"], aliases, matter, s.refreshState.routerHints, srpHosts)
 	nodes = s.stabilizeNodes(nodes)
-	links = append(links, readMatterNeighborLinks(s.cfg.MatterData, matter, nodes)...)
+	if slow || s.refreshState.matterLinks == nil {
+		s.refreshState.matterLinks = parseMatterNeighborLinks(s.refreshState.matterFiles, matter, nodes)
+	}
+	links = append(links, cloneGraphLinks(s.refreshState.matterLinks)...)
 	links = s.stabilizeLinks(nodes, links)
 	links = ensureRouterAnchors(nodes, links)
-	traffic := parseTraffic(raw["rx"], raw["tx"], nodes)
-	annotateTrafficPaths(traffic, nodes, links)
-	applyTraffic(&links, traffic)
+	var traffic []TrafficEvent
+	if s.cfg.EnableTraffic {
+		traffic = parseTraffic(raw["rx"], raw["tx"], nodes, matter)
+		traffic = limitTrafficEvents(traffic, s.cfg.TrafficHistoryLimit)
+		annotateTrafficPaths(traffic, nodes, links)
+		applyTraffic(&links, traffic)
+	}
+	if !s.cfg.IncludeRaw {
+		delete(raw, "rx")
+		delete(raw, "tx")
+	}
+	s.refreshState.raw = cloneStringMap(raw)
 	if changed := rememberDiscoveredNames(s.cfg.AliasFile, &aliases, nodes); changed {
 		raw["stickyNames"] = "updated"
+		s.invalidateAliasCache()
 	}
 	mac := parseCounters(raw["mac"])
 	ip := parseCounters(raw["ip"])
@@ -361,12 +613,223 @@ func (s *Server) refresh(ctx context.Context) error {
 	summary.MACTxTotal = mac["TxTotal"]
 	summary.IPRxSuccess = ip["RxSuccess"]
 	summary.IPTxSuccess = ip["TxSuccess"]
+	mark("build", step)
 
-	ss := Snapshot{GeneratedAt: time.Now(), Network: node, Summary: summary, Nodes: nodes, Links: links, Traffic: traffic, MatterDevices: matter, Counters: map[string]any{"mac": mac, "ip": ip}, Warnings: warnings, Raw: raw}
+	var rawOut map[string]string
+	if s.cfg.IncludeRaw {
+		rawOut = raw
+	}
+	var counters map[string]any
+	if s.cfg.IncludeCounters {
+		counters = map[string]any{"mac": mac, "ip": ip}
+	}
+	fresh := SnapshotFreshness{MACCounters: raw["mac"] != "", IPCounters: raw["ip"] != "", Traffic: s.cfg.EnableTraffic && len(traffic) > 0}
+	ss := Snapshot{GeneratedAt: time.Now(), Config: SnapshotConfig{PollIntervalMS: s.cfg.PollInterval.Milliseconds(), TrafficHistoryLimit: s.cfg.TrafficHistoryLimit, TrafficEnabled: s.cfg.EnableTraffic}, Network: node, Summary: summary, Nodes: nodes, Links: links, Traffic: traffic, MatterDevices: matter, Counters: counters, Fresh: fresh, Warnings: warnings, Raw: rawOut}
+	ss.Version = snapshotVersion(ss)
 	s.mu.Lock()
 	s.ss = ss
 	s.mu.Unlock()
+	if ss.Version != s.refreshState.lastVersion || trafficDue {
+		s.refreshState.lastVersion = ss.Version
+		s.publish(ss)
+	}
+	s.logRefreshTiming(start, slow, trafficDue, timing, len(nodes), len(links), len(traffic), len(warnings))
 	return nil
+}
+
+func (s *Server) readAliasesCached(path string) AliasConfig {
+	if s.cfg.MetadataCacheTTL <= 0 {
+		return readAliases(path)
+	}
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	now := time.Now()
+	c := &s.metaCache.aliases
+	if c.path == path && now.Sub(c.checked) < s.cfg.MetadataCacheTTL {
+		return cloneAliases(c.value)
+	}
+	sig := statFile(path)
+	if c.path == path && c.sig == sig {
+		c.checked = now
+		return cloneAliases(c.value)
+	}
+	value := readAliases(path)
+	*c = aliasCache{path: path, sig: sig, checked: now, value: cloneAliases(value)}
+	return value
+}
+
+func (s *Server) fetchNodeInfoCached(base string) (*NodeInfo, error) {
+	if s.cfg.NodeCacheTTL <= 0 {
+		return fetchNodeInfo(base)
+	}
+	s.nodeMu.Lock()
+	defer s.nodeMu.Unlock()
+	if time.Since(s.nodeCache.checked) < s.cfg.NodeCacheTTL {
+		return cloneNodeInfo(s.nodeCache.value), s.nodeCache.err
+	}
+	node, err := fetchNodeInfo(base)
+	s.nodeCache = nodeInfoCache{checked: time.Now(), value: cloneNodeInfo(node), err: err}
+	return node, err
+}
+
+func (s *Server) invalidateAliasCache() {
+	s.metaMu.Lock()
+	s.metaCache.aliases.checked = time.Time{}
+	s.metaMu.Unlock()
+}
+
+func (s *Server) readMatterDevicesCached(storage string) []MatterDevice {
+	path := filepath.Join(storage, "core.device_registry")
+	if s.cfg.MetadataCacheTTL <= 0 {
+		return readMatterDevices(storage)
+	}
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	now := time.Now()
+	c := &s.metaCache.matter
+	if c.path == path && now.Sub(c.checked) < s.cfg.MetadataCacheTTL {
+		return cloneMatterDevices(c.value)
+	}
+	sig := statFile(path)
+	if c.path == path && c.sig == sig {
+		c.checked = now
+		return cloneMatterDevices(c.value)
+	}
+	value := readMatterDevices(storage)
+	*c = matterDeviceCache{path: path, sig: sig, checked: now, value: cloneMatterDevices(value)}
+	return value
+}
+
+func (s *Server) readMatterFilesCached(dataDir string) []matterFile {
+	if dataDir == "" {
+		return nil
+	}
+	if s.cfg.MetadataCacheTTL <= 0 {
+		return readMatterFiles(dataDir)
+	}
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	now := time.Now()
+	c := &s.metaCache.files
+	if c.dir == dataDir && now.Sub(c.checked) < s.cfg.MetadataCacheTTL {
+		return cloneMatterFiles(c.files)
+	}
+	sig := matterDirSig(dataDir)
+	if c.dir == dataDir && c.sig == sig {
+		c.checked = now
+		return cloneMatterFiles(c.files)
+	}
+	files := readMatterFiles(dataDir)
+	*c = matterFileCache{dir: dataDir, sig: sig, checked: now, files: cloneMatterFiles(files)}
+	return files
+}
+
+func statFile(path string) fileSig {
+	st, err := os.Stat(path)
+	if err != nil {
+		return fileSig{}
+	}
+	return fileSig{exists: true, size: st.Size(), modTime: st.ModTime()}
+}
+
+func cloneAliases(a AliasConfig) AliasConfig {
+	out := AliasConfig{Nodes: map[string]string{}, Notes: map[string]string{}, Sticky: map[string]StickyName{}}
+	for k, v := range a.Nodes {
+		out.Nodes[k] = v
+	}
+	for k, v := range a.Notes {
+		out.Notes[k] = v
+	}
+	for k, v := range a.Sticky {
+		out.Sticky[k] = v
+	}
+	return out
+}
+
+func cloneMatterDevices(in []MatterDevice) []MatterDevice {
+	out := make([]MatterDevice, len(in))
+	copy(out, in)
+	return out
+}
+
+func cloneMatterFiles(in []matterFile) []matterFile {
+	out := make([]matterFile, len(in))
+	for i, f := range in {
+		out[i].path = f.path
+		out[i].data = append([]byte(nil), f.data...)
+	}
+	return out
+}
+
+func cloneNodeInfo(in *NodeInfo) *NodeInfo {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	out := map[string]string{}
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneGraphLinks(in []GraphLink) []GraphLink {
+	out := make([]GraphLink, len(in))
+	copy(out, in)
+	return out
+}
+
+func snapshotVersion(ss Snapshot) string {
+	ss.GeneratedAt = time.Time{}
+	ss.Version = ""
+	b, _ := json.Marshal(struct {
+		Config        SnapshotConfig    `json:"config"`
+		Network       *NodeInfo         `json:"network,omitempty"`
+		Summary       Summary           `json:"summary"`
+		Nodes         []GraphNode       `json:"nodes"`
+		Links         []GraphLink       `json:"links"`
+		Traffic       []TrafficEvent    `json:"traffic"`
+		MatterDevices []MatterDevice    `json:"matterDevices"`
+		Fresh         SnapshotFreshness `json:"fresh"`
+		Warnings      []string          `json:"warnings"`
+	}{
+		Config:        ss.Config,
+		Network:       ss.Network,
+		Summary:       ss.Summary,
+		Nodes:         ss.Nodes,
+		Links:         ss.Links,
+		Traffic:       ss.Traffic,
+		MatterDevices: ss.MatterDevices,
+		Fresh:         ss.Fresh,
+		Warnings:      ss.Warnings,
+	})
+	h := fnv.New64a()
+	_, _ = h.Write(b)
+	return strconv.FormatUint(h.Sum64(), 16)
+}
+
+func (s *Server) logRefreshTiming(start time.Time, slow, traffic bool, timing map[string]time.Duration, nodes, links, events, warnings int) {
+	if !s.cfg.LogRefreshTiming {
+		return
+	}
+	if time.Since(s.refreshState.lastTimingLog) < time.Minute && time.Since(start) < 2*time.Second {
+		return
+	}
+	s.refreshState.lastTimingLog = time.Now()
+	mode := "fast"
+	if slow {
+		mode = "slow"
+	}
+	viewers := s.activeViewerCount()
+	log.Printf("refresh mode=%s viewers=%d traffic=%t total=%s metadata=%s rest=%s matter=%s otctl=%s build=%s nodes=%d links=%d events=%d warnings=%d",
+		mode, viewers, traffic, time.Since(start).Round(time.Millisecond),
+		timing["metadata"].Round(time.Millisecond), timing["rest"].Round(time.Millisecond),
+		timing["matter"].Round(time.Millisecond), timing["otctl"].Round(time.Millisecond),
+		timing["build"].Round(time.Millisecond), nodes, links, events, warnings)
 }
 
 func fetchNodeInfo(base string) (*NodeInfo, error) {
@@ -467,6 +930,15 @@ func (s *Server) enrichMatterIPs(ctx context.Context, matter []MatterDevice) []M
 	s.matterIPs = ips
 	s.matterIPsAt = time.Now()
 	return applyMatterIPs(matter, ips)
+}
+
+func (s *Server) applyCachedMatterIPs(matter []MatterDevice) []MatterDevice {
+	s.matterMu.Lock()
+	defer s.matterMu.Unlock()
+	if s.matterIPs == nil {
+		return matter
+	}
+	return applyMatterIPs(matter, s.matterIPs)
 }
 
 func applyMatterIPs(matter []MatterDevice, ips map[string]string) []MatterDevice {
@@ -640,22 +1112,21 @@ func (w *wsConn) readText() ([]byte, error) {
 }
 
 func readRouterHints(dataDir string, matter []MatterDevice) map[string]RouterHint {
+	return parseRouterHints(readMatterFiles(dataDir), matter)
+}
+
+func parseRouterHints(files []matterFile, matter []MatterDevice) map[string]RouterHint {
 	out := map[string]RouterHint{}
-	if dataDir == "" {
+	if len(files) == 0 {
 		return out
 	}
 	nameByNode := map[string]MatterDevice{}
 	for _, d := range matter {
 		nameByNode[strings.ToUpper(strings.TrimLeft(d.NodeID, "0"))] = d
 	}
-	files, _ := filepath.Glob(filepath.Join(dataDir, "*.json"))
-	for _, path := range files {
-		base := filepath.Base(path)
+	for _, file := range files {
+		base := filepath.Base(file.path)
 		if base == "chip.json" || strings.HasSuffix(base, ".backup") {
-			continue
-		}
-		b, err := os.ReadFile(path)
-		if err != nil {
 			continue
 		}
 		var doc struct {
@@ -663,7 +1134,7 @@ func readRouterHints(dataDir string, matter []MatterDevice) map[string]RouterHin
 				Attributes map[string]any `json:"attributes"`
 			} `json:"nodes"`
 		}
-		dec := json.NewDecoder(bytes.NewReader(b))
+		dec := json.NewDecoder(bytes.NewReader(file.data))
 		dec.UseNumber()
 		if dec.Decode(&doc) != nil || len(doc.Nodes) == 0 {
 			continue
@@ -705,7 +1176,11 @@ func readRouterHints(dataDir string, matter []MatterDevice) map[string]RouterHin
 }
 
 func readMatterNeighborLinks(dataDir string, matter []MatterDevice, nodes []GraphNode) []GraphLink {
-	if dataDir == "" || len(matter) == 0 || len(nodes) == 0 {
+	return parseMatterNeighborLinks(readMatterFiles(dataDir), matter, nodes)
+}
+
+func parseMatterNeighborLinks(files []matterFile, matter []MatterDevice, nodes []GraphNode) []GraphLink {
+	if len(files) == 0 || len(matter) == 0 || len(nodes) == 0 {
 		return nil
 	}
 	nodeByMatter := map[string]string{}
@@ -732,13 +1207,8 @@ func readMatterNeighborLinks(dataDir string, matter []MatterDevice, nodes []Grap
 		}
 	}
 	best := map[string]GraphLink{}
-	files, _ := filepath.Glob(filepath.Join(dataDir, "*.json"))
-	for _, path := range files {
-		if filepath.Base(path) == "chip.json" {
-			continue
-		}
-		b, err := os.ReadFile(path)
-		if err != nil {
+	for _, file := range files {
+		if filepath.Base(file.path) == "chip.json" {
 			continue
 		}
 		var doc struct {
@@ -746,7 +1216,7 @@ func readMatterNeighborLinks(dataDir string, matter []MatterDevice, nodes []Grap
 				Attributes map[string]any `json:"attributes"`
 			} `json:"nodes"`
 		}
-		dec := json.NewDecoder(bytes.NewReader(b))
+		dec := json.NewDecoder(bytes.NewReader(file.data))
 		dec.UseNumber()
 		if dec.Decode(&doc) != nil {
 			continue
@@ -793,6 +1263,45 @@ func readMatterNeighborLinks(dataDir string, matter []MatterDevice, nodes []Grap
 		return out[i].Source < out[j].Source
 	})
 	return out
+}
+
+func readMatterFiles(dataDir string) []matterFile {
+	if dataDir == "" {
+		return nil
+	}
+	paths, _ := filepath.Glob(filepath.Join(dataDir, "*.json"))
+	sort.Strings(paths)
+	files := make([]matterFile, 0, len(paths))
+	for _, path := range paths {
+		base := filepath.Base(path)
+		if base == "chip.json" || strings.HasSuffix(base, ".backup") {
+			continue
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		files = append(files, matterFile{path: path, data: b})
+	}
+	return files
+}
+
+func matterDirSig(dataDir string) string {
+	paths, _ := filepath.Glob(filepath.Join(dataDir, "*.json"))
+	sort.Strings(paths)
+	var b strings.Builder
+	for _, path := range paths {
+		base := filepath.Base(path)
+		if base == "chip.json" || strings.HasSuffix(base, ".backup") {
+			continue
+		}
+		st, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		fmt.Fprintf(&b, "%s:%d:%d\n", base, st.Size(), st.ModTime().UnixNano())
+	}
+	return b.String()
 }
 
 func linkScore(l GraphLink) int {
@@ -1035,12 +1544,16 @@ func addRouterTableLinks(links *[]GraphLink, nodes []GraphNode, out string) {
 }
 
 func (s *Server) stabilizeNodes(nodes []GraphNode) []GraphNode {
-	if s.cfg.TopologyTTL <= 0 {
+	ttl := s.cfg.TopologyNodeTTL
+	if ttl == 0 {
+		ttl = s.cfg.TopologyTTL
+	}
+	if ttl <= 0 {
 		return nodes
 	}
 	now := time.Now()
-	s.nodeMu.Lock()
-	defer s.nodeMu.Unlock()
+	s.stickyNodeMu.Lock()
+	defer s.stickyNodeMu.Unlock()
 	if s.stickyNodes == nil {
 		s.stickyNodes = map[string]cachedNode{}
 	}
@@ -1057,20 +1570,37 @@ func (s *Server) stabilizeNodes(nodes []GraphNode) []GraphNode {
 		if current[id] {
 			continue
 		}
-		if now.Sub(cached.SeenAt) > s.cfg.TopologyTTL {
+		age := now.Sub(cached.SeenAt)
+		if age > ttl {
 			delete(s.stickyNodes, id)
 			continue
 		}
 		n := cached.Node
-		if n.Note == "" {
-			n.Note = "Node retained from recent poll; OTBR did not return it in the latest table"
-		}
+		n.Retained = true
+		n.LastSeenAgo = int(age.Round(time.Second).Seconds())
+		n.LinkStatus = "stale"
+		n.MatterGuess = ""
+		n.Note = fmt.Sprintf("Stale node retained for layout continuity; OTBR last reported it %s ago.", humanDuration(age))
 		out = append(out, n)
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		return nodeSortKey(out[i]) < nodeSortKey(out[j])
 	})
 	return out
+}
+
+func humanDuration(d time.Duration) string {
+	if d < time.Second {
+		return "less than 1s"
+	}
+	d = d.Round(time.Second)
+	if d < time.Minute {
+		return d.String()
+	}
+	if d < time.Hour {
+		return d.Truncate(time.Second).String()
+	}
+	return d.Truncate(time.Minute).String()
 }
 
 func nodeSortKey(n GraphNode) string {
@@ -1185,7 +1715,7 @@ func orderedLinkKey(a, b string) string {
 	return a + "--" + b
 }
 
-func parseTraffic(rxOut, txOut string, nodes []GraphNode) []TrafficEvent {
+func parseTraffic(rxOut, txOut string, nodes []GraphNode, matter []MatterDevice) []TrafficEvent {
 	byRloc := map[string]GraphNode{}
 	byIP := map[string]GraphNode{}
 	for _, n := range nodes {
@@ -1196,15 +1726,25 @@ func parseTraffic(rxOut, txOut string, nodes []GraphNode) []TrafficEvent {
 			byIP[strings.ToLower(n.ThreadIP)] = n
 		}
 	}
-	events := append(parseTrafficBlock(rxOut, "rx", byRloc, byIP), parseTrafficBlock(txOut, "tx", byRloc, byIP)...)
-	sort.SliceStable(events, func(i, j int) bool { return durationAge(events[i].Age) < durationAge(events[j].Age) })
-	if len(events) > 80 {
-		events = events[:80]
+	matterByIP := map[string]MatterDevice{}
+	for _, d := range matter {
+		if d.ThreadIP != "" {
+			matterByIP[strings.ToLower(d.ThreadIP)] = d
+		}
 	}
+	events := append(parseTrafficBlock(rxOut, "rx", byRloc, byIP, matterByIP), parseTrafficBlock(txOut, "tx", byRloc, byIP, matterByIP)...)
+	sort.SliceStable(events, func(i, j int) bool { return durationAge(events[i].Age) < durationAge(events[j].Age) })
 	return events
 }
 
-func parseTrafficBlock(out, dir string, byRloc map[string]GraphNode, byIP map[string]GraphNode) []TrafficEvent {
+func limitTrafficEvents(events []TrafficEvent, limit int) []TrafficEvent {
+	if limit <= 0 || len(events) <= limit {
+		return events
+	}
+	return append([]TrafficEvent(nil), events[:limit]...)
+}
+
+func parseTrafficBlock(out, dir string, byRloc map[string]GraphNode, byIP map[string]GraphNode, matterByIP map[string]MatterDevice) []TrafficEvent {
 	var events []TrafficEvent
 	var ev *TrafficEvent
 	headerRe := regexp.MustCompile(`^(\d\d:\d\d:\d\d\.\d+)`)
@@ -1247,6 +1787,9 @@ func parseTrafficBlock(out, dir string, byRloc map[string]GraphNode, byIP map[st
 			ev.Src = m[1] + ":" + m[2]
 			if n, ok := byIP[strings.ToLower(m[1])]; ok && ev.Note == "" {
 				ev.Note = n.Label
+			} else if d, ok := matterByIP[strings.ToLower(m[1])]; ok && ev.Note == "" {
+				ev.Note = d.Name
+				ev.Peer = "matter-" + canonicalMatterNodeID(d.NodeID)
 			}
 			continue
 		}
@@ -1254,6 +1797,9 @@ func parseTrafficBlock(out, dir string, byRloc map[string]GraphNode, byIP map[st
 			ev.Dst = m[1] + ":" + m[2]
 			if n, ok := byIP[strings.ToLower(m[1])]; ok && ev.Note == "" {
 				ev.Note = n.Label
+			} else if d, ok := matterByIP[strings.ToLower(m[1])]; ok && ev.Note == "" {
+				ev.Note = d.Name
+				ev.Peer = "matter-" + canonicalMatterNodeID(d.NodeID)
 			}
 		}
 	}
@@ -1548,10 +2094,11 @@ func splitRow(line string) []string {
 	return out
 }
 func idFor(rloc, mac string) string {
-	if rloc != "" {
-		return rloc
+	mac = strings.ToLower(strings.TrimSpace(mac))
+	if mac != "" && mac != "-" {
+		return mac
 	}
-	return strings.ToLower(mac)
+	return strings.ToLower(strings.TrimSpace(rloc))
 }
 func atoi(s string) int { i, _ := strconv.Atoi(strings.TrimSpace(s)); return i }
 
@@ -1587,6 +2134,126 @@ func dockerExec(ctx context.Context, sock, container string, cmd []string) (stri
 	return decodeDockerStream(body), nil
 }
 
+func (s *Server) runOTCtlCommands(ctx context.Context, warnings []string, slow, traffic bool) (map[string]string, []string) {
+	cmds := []commandSpec{
+		{name: "mac", args: []string{"ot-ctl", "counters", "mac"}},
+		{name: "ip", args: []string{"ot-ctl", "counters", "ip"}},
+	}
+	if slow {
+		cmds = append(cmds,
+			commandSpec{name: "neighbor", args: []string{"ot-ctl", "neighbor", "table"}},
+			commandSpec{name: "child", args: []string{"ot-ctl", "child", "table"}},
+			commandSpec{name: "srpHosts", args: []string{"ot-ctl", "srp", "server", "host"}},
+			commandSpec{name: "topology", args: []string{"ot-ctl", "history", "netinfo", "list"}},
+			commandSpec{name: "routerTable", args: []string{"ot-ctl", "router", "table"}},
+		)
+	}
+	if traffic {
+		cmds = append(cmds,
+			commandSpec{name: "rx", args: []string{"ot-ctl", "history", "rx", "list"}},
+			commandSpec{name: "tx", args: []string{"ot-ctl", "history", "tx", "list"}},
+		)
+	}
+
+	raw, err := dockerExecBatch(ctx, s.cfg.DockerSocket, s.cfg.OTBRContainer, cmds)
+	if err != nil {
+		warnings = append(warnings, "batched ot-ctl failed, falling back to individual exec: "+err.Error())
+		raw = map[string]string{}
+	}
+	for _, spec := range cmds {
+		if _, ok := raw[spec.name]; ok {
+			continue
+		}
+		out, err := dockerExec(ctx, s.cfg.DockerSocket, s.cfg.OTBRContainer, spec.args)
+		if err != nil {
+			warnings = append(warnings, spec.name+" failed: "+err.Error())
+			continue
+		}
+		raw[spec.name] = out
+	}
+	return raw, warnings
+}
+
+func attemptedOTCtlKeys(slow, traffic bool) []string {
+	keys := []string{"mac", "ip"}
+	if slow {
+		keys = append(keys, "neighbor", "child", "srpHosts", "topology", "routerTable")
+	}
+	if traffic {
+		keys = append(keys, "rx", "tx")
+	}
+	return keys
+}
+
+func dockerExecBatch(ctx context.Context, sock, container string, specs []commandSpec) (map[string]string, error) {
+	var script strings.Builder
+	for _, spec := range specs {
+		fmt.Fprintf(&script, "printf '\\n%s\\n'\n", batchBegin(spec.name))
+		script.WriteString(strings.Join(spec.args, " "))
+		script.WriteString(" 2>&1 || true\n")
+		fmt.Fprintf(&script, "printf '\\n%s\\n'\n", batchEnd(spec.name))
+	}
+	out, err := dockerExec(ctx, sock, container, []string{"sh", "-c", script.String()})
+	if err != nil {
+		return nil, err
+	}
+	return parseBatchOutput(out), nil
+}
+
+func parseBatchOutput(out string) map[string]string {
+	result := map[string]string{}
+	var current string
+	var buf strings.Builder
+	flush := func() {
+		if current == "" {
+			return
+		}
+		result[current] = strings.Trim(buf.String(), "\r\n")
+		current = ""
+		buf.Reset()
+	}
+	s := bufio.NewScanner(strings.NewReader(out))
+	for s.Scan() {
+		line := strings.TrimSpace(s.Text())
+		if name, ok := batchMarkerName(line, "__THREAD_DASHBOARD_BEGIN_"); ok {
+			flush()
+			current = name
+			continue
+		}
+		if name, ok := batchMarkerName(line, "__THREAD_DASHBOARD_END_"); ok {
+			if current == name {
+				flush()
+			}
+			continue
+		}
+		if current != "" {
+			buf.WriteString(s.Text())
+			buf.WriteByte('\n')
+		}
+	}
+	flush()
+	return result
+}
+
+func batchBegin(name string) string {
+	return "__THREAD_DASHBOARD_BEGIN_" + name + "__"
+}
+
+func batchEnd(name string) string {
+	return "__THREAD_DASHBOARD_END_" + name + "__"
+}
+
+func batchMarkerName(line, prefix string) (string, bool) {
+	if !strings.HasPrefix(line, prefix) || !strings.HasSuffix(line, "__") {
+		return "", false
+	}
+	name := strings.TrimSuffix(strings.TrimPrefix(line, prefix), "__")
+	if name == "" {
+		return "", false
+	}
+	return name, true
+}
+
 func dockerJSON(ctx context.Context, sock, method, path string, in any, out any) error {
 	body, err := dockerRaw(ctx, sock, method, path, in)
 	if err != nil {
@@ -1603,10 +2270,7 @@ func dockerRaw(ctx context.Context, sock, method, path string, in any) ([]byte, 
 	}
 	req, _ := http.NewRequestWithContext(ctx, method, "http://docker"+path, r)
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, "unix", sock)
-	}}, Timeout: 8 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := dockerClient(sock).Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -1616,6 +2280,19 @@ func dockerRaw(ctx context.Context, sock, method, path string, in any) ([]byte, 
 		return nil, fmt.Errorf("docker api %s: %s", resp.Status, strings.TrimSpace(string(b)))
 	}
 	return b, nil
+}
+
+func dockerClient(sock string) *http.Client {
+	if client, ok := dockerClients.Load(sock); ok {
+		return client.(*http.Client)
+	}
+	client := &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", sock)
+		},
+	}, Timeout: 8 * time.Second}
+	actual, _ := dockerClients.LoadOrStore(sock, client)
+	return actual.(*http.Client)
 }
 
 func decodeDockerStream(b []byte) string {

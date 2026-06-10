@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.2.0 - 2026-06-10
+
+### Added
+
+- Shared live refresh loop with active-viewer detection and idle polling.
+- Separate fast, slow, and idle polling intervals for lighter long-running deployments.
+- Snapshot versioning for lower-noise server-sent event updates.
+- Metadata and OTBR node caching.
+- Configurable raw diagnostics, full counters, traffic collection, and traffic history limits.
+- Stable node IDs based on extended MAC addresses where available.
+- Retained stale nodes with configurable `TOPOLOGY_NODE_TTL`.
+- Drag, pan, zoom, fit, and browser-persisted graph layout.
+- Collapsible status, Matter mapping, health, selected-node, and traffic panels.
+- Traffic event mapping to stable topology nodes and Matter IP-only devices.
+- Unit tests for configuration, refresh serialization, SSE output, caching, parsing, graph stability, and traffic handling.
+
+### Changed
+
+- Default `POLL_INTERVAL` is now `10s`, with values below `2s` clamped.
+- Default deployment is tuned for lower CPU and memory use with `GOGC=50` and `GOMEMLIMIT=64MiB`.
+- README was rewritten for GitHub-ready installation, architecture, security, troubleshooting, and release documentation.
+
 ## v0.1.0 - 2026-06-08
 
 Initial public release of `better-otbr-ha-dashboard`.

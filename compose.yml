@@ -12,9 +12,21 @@ services:
       - MATTER_DATA=${MATTER_DATA:-/matter-data}
       - MATTER_WS_URL=${MATTER_WS_URL:-ws://127.0.0.1:5580/ws}
       - MATTER_IP_TTL=${MATTER_IP_TTL:-10m}
+      - TOPOLOGY_NODE_TTL=${TOPOLOGY_NODE_TTL:-90s}
       - TOPOLOGY_LINK_TTL=${TOPOLOGY_LINK_TTL:-5m}
       - ALIAS_FILE=${ALIAS_FILE:-/config/aliases.json}
-      - POLL_INTERVAL=${POLL_INTERVAL:-1s}
+      - POLL_INTERVAL=${POLL_INTERVAL:-10s}
+      - SLOW_POLL_INTERVAL=${SLOW_POLL_INTERVAL:-60s}
+      - IDLE_POLL_INTERVAL=${IDLE_POLL_INTERVAL:-60s}
+      - METADATA_CACHE_TTL=${METADATA_CACHE_TTL:-30s}
+      - NODE_CACHE_TTL=${NODE_CACHE_TTL:-30s}
+      - INCLUDE_RAW=${INCLUDE_RAW:-false}
+      - INCLUDE_COUNTERS=${INCLUDE_COUNTERS:-false}
+      - ENABLE_TRAFFIC=${ENABLE_TRAFFIC:-true}
+      - LOG_REFRESH_TIMING=${LOG_REFRESH_TIMING:-true}
+      - TRAFFIC_HISTORY_LIMIT=${TRAFFIC_HISTORY_LIMIT:-2000}
+      - GOGC=${GOGC:-50}
+      - GOMEMLIMIT=${GOMEMLIMIT:-64MiB}
       - DOCKER_SOCKET=${DOCKER_SOCKET:-/var/run/docker.sock}
     volumes:
       - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock:ro

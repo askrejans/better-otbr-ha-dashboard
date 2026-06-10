@@ -1,56 +1,77 @@
 # better-otbr-ha-dashboard
 
-A self-hosted live dashboard for OpenThread Border Router networks.
+Self-hosted live dashboard for Dockerized OpenThread Border Router networks, built for Home Assistant, OTBR, and Matter Server stacks.
 
-Better OTBR HA Dashboard combines OTBR REST data, `ot-ctl` diagnostics, optional Home Assistant Matter names, optional python-matter-server diagnostics, local aliases, and live traffic history into one browser UI.
-
-It is built for Dockerized OTBR deployments, including Home Assistant + OTBR + Matter Server stacks, while keeping all host-specific paths and endpoints in `.env`.
+`better-otbr-ha-dashboard` combines OTBR REST data, `ot-ctl` diagnostics, Home Assistant Matter names, python-matter-server diagnostics, local aliases, and live traffic history into one browser UI. It is designed for trusted local servers where the Thread border router already runs in Docker.
 
 ## Features
 
-- Live Thread topology graph for OTBR, routers, children, sleepy/end devices, relay paths, and observed Matter diagnostics links
-- Stable graph rendering with retained nodes and links when OTBR misses a poll
-- Direct, relay, observed, and retained/anchor links styled separately
-- Friendly names from Home Assistant Matter device registry
-- Live Matter IP lookup through python-matter-server websocket
-- Sticky local name cache so labels do not flicker when IP-only matches are stale
-- Traffic history inspector with pause, clear, search, direction filter, source/destination IPs, RSSI, byte counts, and inferred path display
-- Single Go backend and static frontend
-- Docker Compose deployment with `.env` configuration
-- No external frontend CDN or hosted service dependency
+- Thread topology graph for OTBR, routers, children, relay paths, retained links, and Matter diagnostics observations
+- Smooth traffic visualization across direct and inferred multi-hop paths
+- Traffic log with local timestamps, direction, protocol, byte count, RSSI, endpoints, and inferred path
+- Accurate counter rate display with stale-read and counter-reset handling
+- User-arranged graph layout persisted in browser storage
+- Fit, pan, and zoom controls
+- Home Assistant Matter device names from `.storage/core.device_registry`
+- Matter IP enrichment from python-matter-server websocket
+- Matter Thread Diagnostics links from python-matter-server data
+- Manual aliases, notes, and sticky discovered names
+- Fast, slow, and idle refresh lanes
+- Shared backend refresh loop for all live clients
+- Docker Compose deployment
+- Single Go binary with static frontend assets
 
-## Maintainer
+## Screens
 
-Arvis Skrējāns <arvis.skrejans@gmail.com>
+- Live topology graph with retained nodes, weak-link highlighting, and active traffic overlays
+- Collapsible status, health, Matter mapping, selected-node, and traffic panels
+- Local traffic inspector with pause, clear, search, and direction filters
 
-## How It Works
+## Data Sources
 
-The dashboard collects data from several optional sources:
-
-- `OTBR_REST_URL`: basic OpenThread node/network metadata.
-- `docker exec <OTBR_CONTAINER> ot-ctl ...`: live Thread diagnostics, counters, router/child tables, route table, SRP hosts, and RX/TX packet history.
-- Home Assistant `.storage/core.device_registry`: Matter device names, manufacturers, models, and user-friendly names.
-- python-matter-server websocket: live Matter node IP addresses for better automatic name matching.
-- python-matter-server data directory: Matter Thread Diagnostics attributes used for observed links.
-- `config/aliases.json`: manual aliases, notes, and sticky discovered names.
-
-OTBR packet history only shows traffic crossing the border router. Hidden child-to-parent forwarding is not packet-sniffed by this dashboard. Multi-hop paths are inferred from Thread route tables and Matter Thread Diagnostics, and the UI marks those as inferred.
+| Source | Purpose |
+| --- | --- |
+| `OTBR_REST_URL` | OTBR node and network metadata |
+| Docker API + `ot-ctl` | Counters, topology tables, router table, SRP hosts, RX/TX history |
+| Home Assistant `.storage/core.device_registry` | Matter names, models, manufacturers, area IDs |
+| python-matter-server websocket | Matter node Thread IP addresses |
+| python-matter-server data directory | Matter Thread Diagnostics route and neighbor observations |
+| `config/aliases.json` | Manual aliases, notes, sticky discovered names |
 
 ## Requirements
 
-- Docker and Docker Compose
-- An existing OTBR container reachable through Docker
-- OTBR REST API enabled/reachable
-- Read-only access to Docker socket for `docker exec`
-- Optional: Home Assistant `.storage` path for friendly Matter names
-- Optional: python-matter-server data path and websocket for better linking/diagnostics
+- Docker
+- Docker Compose
+- Dockerized OTBR container
+- OTBR REST API
+- Docker socket access
+- Optional Home Assistant `.storage` directory
+- Optional python-matter-server data directory and websocket
+
+## Architecture
+
+```text
+Browser
+  |
+  |  /api/events, /api/snapshot, /api/refresh
+  v
+Go backend
+  |-- OTBR REST API
+  |-- Docker API -> ot-ctl inside OTBR container
+  |-- Home Assistant device registry
+  |-- python-matter-server websocket
+  |-- python-matter-server diagnostics files
+  `-- config/aliases.json
+```
+
+The backend runs one shared refresh loop for all connected browsers. Expensive topology and metadata work runs on a slower cadence than live counter and traffic updates.
 
 ## Quick Start
 
 ```bash
-cd better-otbr-ha-dashboard
 cp .env.example .env
 mkdir -p config empty-ha-storage empty-matter-data
+cp config/aliases.example.json config/aliases.json
 docker compose up -d --build
 ```
 
@@ -62,20 +83,11 @@ http://SERVER_IP:8888
 
 ## Docker Compose
 
-The included `compose.yml` is designed to be configured through `.env`.
-
 ```bash
 docker compose up -d --build
-docker compose logs -f
+docker compose logs -f better-otbr-ha-dashboard
+docker compose down
 ```
-
-To update after changing files:
-
-```bash
-docker compose up -d --build --force-recreate
-```
-
-## Common Deployment Modes
 
 ### Host Networking
 
@@ -88,9 +100,9 @@ OTBR_REST_URL=http://127.0.0.1:8981
 MATTER_WS_URL=ws://127.0.0.1:5580/ws
 ```
 
-### Docker Bridge Networking
+### Bridge Networking
 
-Use service/container names or reachable host addresses:
+Use reachable container names or host addresses:
 
 ```env
 NETWORK_MODE=bridge
@@ -99,45 +111,44 @@ OTBR_REST_URL=http://otbr:8981
 MATTER_WS_URL=ws://matter-server:5580/ws
 ```
 
-If using bridge networking, expose/publish `LISTEN_ADDR` as needed in your Compose file.
-
-### Home Assistant + OTBR + Matter Server
-
-Typical configuration:
-
-```env
-NETWORK_MODE=host
-OTBR_CONTAINER=otbr
-OTBR_REST_URL=http://127.0.0.1:8981
-HA_STORAGE_HOST=/path/to/homeassistant/.storage
-MATTER_DATA_HOST=/path/to/python-matter-server/data
-MATTER_WS_URL=ws://127.0.0.1:5580/ws
-```
+If you use bridge networking, expose the dashboard port in your Compose file.
 
 ## Configuration
 
-All runtime settings are controlled by `.env`.
+All runtime configuration is provided through `.env`.
 
-| Variable | Default | Required | Description |
-| --- | --- | --- | --- |
-| `THREAD_DASHBOARD_PORT` | `8888` | No | Human-facing port hint. Currently not used directly by `compose.yml` when `NETWORK_MODE=host`, but useful if you adapt Compose for bridge mode. |
-| `CONTAINER_NAME` | `better-otbr-ha-dashboard` | No | Container name for this dashboard. |
-| `NETWORK_MODE` | `host` | No | Docker network mode. `host` is easiest for localhost OTBR/Matter endpoints. |
-| `LISTEN_ADDR` | `:8888` | Yes | Address/port the dashboard listens on inside the container or host network namespace. |
-| `OTBR_REST_URL` | `http://127.0.0.1:8981` | Yes | OpenThread Border Router REST endpoint. |
-| `OTBR_CONTAINER` | `otbr` | Yes | Existing OTBR container name used for `docker exec ... ot-ctl`. |
-| `DOCKER_SOCKET` | `/var/run/docker.sock` | Yes | Docker socket path mounted read-only so the dashboard can execute `ot-ctl` inside `OTBR_CONTAINER`. |
-| `HA_STORAGE_HOST` | `./empty-ha-storage` | No | Host path to Home Assistant `.storage`; enables Matter device names. |
-| `HA_STORAGE` | `/ha-storage` | No | Container mount path for Home Assistant `.storage`. |
-| `MATTER_DATA_HOST` | `./empty-matter-data` | No | Host path to python-matter-server data; enables Matter Thread Diagnostics inference. |
-| `MATTER_DATA` | `/matter-data` | No | Container mount path for python-matter-server data. |
-| `MATTER_WS_URL` | `ws://127.0.0.1:5580/ws` | No | python-matter-server websocket endpoint used for live Matter IP lookup. |
-| `MATTER_IP_TTL` | `10m` | No | Cache duration for Matter IP lookup results. |
-| `TOPOLOGY_LINK_TTL` | `5m` | No | How long to retain recently seen nodes and topology links when OTBR misses data. |
-| `ALIAS_FILE` | `/config/aliases.json` | No | Alias file path inside the container. Host file lives under `./config`. |
-| `POLL_INTERVAL` | `1s` | No | Backend refresh interval. |
+| Variable | Default | Description |
+| --- | --- | --- |
+| `THREAD_DASHBOARD_PORT` | `8888` | Human-facing port hint |
+| `CONTAINER_NAME` | `better-otbr-ha-dashboard` | Dashboard container name |
+| `NETWORK_MODE` | `host` | Docker network mode |
+| `LISTEN_ADDR` | `:8888` | HTTP listen address |
+| `OTBR_REST_URL` | `http://127.0.0.1:8981` | OTBR REST API URL |
+| `OTBR_CONTAINER` | `otbr` | OTBR container name |
+| `DOCKER_SOCKET` | `/var/run/docker.sock` | Docker socket path |
+| `HA_STORAGE_HOST` | `./empty-ha-storage` | Host path to Home Assistant `.storage` |
+| `HA_STORAGE` | `/ha-storage` | Container path for Home Assistant `.storage` |
+| `MATTER_DATA_HOST` | `./empty-matter-data` | Host path to python-matter-server data |
+| `MATTER_DATA` | `/matter-data` | Container path for python-matter-server data |
+| `MATTER_WS_URL` | `ws://127.0.0.1:5580/ws` | python-matter-server websocket URL |
+| `MATTER_IP_TTL` | `10m` | Matter IP cache duration |
+| `TOPOLOGY_NODE_TTL` | `90s` | Retained missing node duration |
+| `TOPOLOGY_LINK_TTL` | `5m` | Retained topology link duration |
+| `ALIAS_FILE` | `/config/aliases.json` | Alias file path |
+| `POLL_INTERVAL` | `10s` | Fast refresh interval for counters and traffic |
+| `SLOW_POLL_INTERVAL` | `60s` | Slow refresh interval for topology, SRP, router table, Matter diagnostics |
+| `IDLE_POLL_INTERVAL` | `60s` | Refresh interval with no live browser clients |
+| `METADATA_CACHE_TTL` | `30s` | Disk metadata cache duration |
+| `NODE_CACHE_TTL` | `30s` | OTBR REST `/node` cache duration |
+| `INCLUDE_RAW` | `false` | Include raw `ot-ctl` output in API snapshots |
+| `INCLUDE_COUNTERS` | `false` | Include full parsed counter maps in API snapshots |
+| `ENABLE_TRAFFIC` | `true` | Collect OTBR RX/TX history |
+| `LOG_REFRESH_TIMING` | `true` | Log refresh timing |
+| `TRAFFIC_HISTORY_LIMIT` | `2000` | Browser-side retained traffic events |
+| `GOGC` | `50` | Go garbage collection target |
+| `GOMEMLIMIT` | `64MiB` | Go soft memory limit |
 
-Durations use Go duration syntax, for example `1s`, `30s`, `5m`, `1h`.
+Durations use Go duration syntax: `1s`, `30s`, `5m`, `1h`.
 
 ## Example `.env`
 
@@ -158,14 +169,28 @@ MATTER_DATA=/matter-data
 MATTER_WS_URL=ws://127.0.0.1:5580/ws
 MATTER_IP_TTL=10m
 
+TOPOLOGY_NODE_TTL=90s
 TOPOLOGY_LINK_TTL=5m
 ALIAS_FILE=/config/aliases.json
-POLL_INTERVAL=1s
+
+POLL_INTERVAL=10s
+SLOW_POLL_INTERVAL=60s
+IDLE_POLL_INTERVAL=60s
+METADATA_CACHE_TTL=30s
+NODE_CACHE_TTL=30s
+
+INCLUDE_RAW=false
+INCLUDE_COUNTERS=false
+ENABLE_TRAFFIC=true
+LOG_REFRESH_TIMING=true
+TRAFFIC_HISTORY_LIMIT=2000
+GOGC=50
+GOMEMLIMIT=64MiB
 ```
 
-## Aliases And Sticky Names
+## Aliases
 
-Use `config/aliases.json` to pin names and notes:
+`config/aliases.json`:
 
 ```json
 {
@@ -174,80 +199,79 @@ Use `config/aliases.json` to pin names and notes:
     "821988813fe1b531": "Kitchen motion sensor"
   },
   "notes": {
-    "0x5006": "Weak signal; move closer to a router"
+    "0x5006": "Weak signal"
   },
   "sticky": {}
 }
 ```
 
-Start from the safe example file:
+Supported node keys:
 
-```bash
-cp config/aliases.example.json config/aliases.json
-```
-
-Supported keys include:
-
-- Thread RLOC16, for example `0x5006`
-- Extended MAC, for example `821988813fe1b531`
+- Thread RLOC16
+- Extended MAC
 - Dashboard node ID
 
-The dashboard also writes discovered sticky names to `sticky`. Sticky names intentionally win over volatile IP-only matches so names do not alternate when Matter IP cache data is stale.
+The dashboard may write discovered sticky names to `sticky`. Sticky names help prevent labels from flickering when live Matter IP data is temporarily stale.
 
-## Traffic View
+## Graph
 
-The traffic panel stores a local browser-side history and shows:
-
-- Direction: `rx` means into OTBR; `tx` means from OTBR
-- Full inferred path, for example `Device -> Router -> OTBR`
-- Protocol
-- Byte count
-- RSSI when OTBR reports it
-- Source and destination IPv6/port
-- Whether the route is direct or inferred
-
-Use Pause while investigating; live graph updates can continue while the traffic list is frozen.
-
-## Link Types
-
-| Type | Meaning |
+| Visual | Meaning |
 | --- | --- |
-| `child` | Direct OTBR child table link. |
-| `router` | Direct OTBR neighbor/router link. |
-| `relay` | Route-table next-hop relationship between routers. |
-| `observed` | Matter Thread Diagnostics neighbor observation. |
-| `anchor` | Retained fallback link used to keep a recently seen router attached to OTBR when one poll misses the direct link. |
+| Yellow node | OTBR |
+| Blue node | Router |
+| Green node | Child/end device |
+| Red node | Weak node |
+| Gray dashed node | Stale retained node |
+| Solid link | Direct OTBR neighbor or child link |
+| Dashed link | Relay or mesh link |
+| Dotted yellow-green link | Matter diagnostics observation |
+| Faint dotted link | Retained fallback link |
+| Bright/wide link | Active traffic |
+| Red link | Weak link |
 
-## Security Notes
+Node positions can be rearranged by dragging. Positions are saved in browser `localStorage`; new nodes are added to the existing saved layout.
 
-The dashboard mounts the Docker socket read-only, but Docker socket access is still powerful because it allows API access to Docker. Run this only on a trusted local server/network.
+## Traffic
 
-Recommended hardening:
+`ENABLE_TRAFFIC=true` collects OTBR RX/TX history and displays all retained events up to `TRAFFIC_HISTORY_LIMIT`.
 
-- Bind `LISTEN_ADDR` only where needed.
-- Put the dashboard behind your existing reverse proxy/authentication if exposing beyond a trusted LAN.
-- Keep `HA_STORAGE_HOST` and `MATTER_DATA_HOST` read-only as shown in `compose.yml`.
-- Do not commit private `config/aliases.json` if it contains household device names.
+Traffic is border-router history reported by OTBR. It is not a full Thread packet sniffer. Multi-hop paths are inferred from Thread route data and Matter diagnostics when available.
+
+## API
+
+| Endpoint | Description |
+| --- | --- |
+| `/api/snapshot` | Latest dashboard snapshot |
+| `/api/refresh` | Manual refresh and snapshot response |
+| `/api/events` | Server-sent snapshot stream |
+
+## Security
+
+The Docker socket is mounted read-only in `compose.yml`, but Docker socket access is still powerful. Run this dashboard only on a trusted host and trusted network.
+
+Recommended production posture:
+
+- Keep the service on a trusted LAN or behind your own reverse proxy and authentication.
+- Mount Home Assistant and Matter Server paths read-only.
+- Do not commit private `config/aliases.json` files if they contain household names or device labels.
+- Keep `INCLUDE_RAW=false` unless actively debugging.
 
 ## Limitations
 
-- The current backend expects a Dockerized OTBR container and uses `docker exec <OTBR_CONTAINER> ot-ctl`.
-- Bare-metal OTBR is not first-class yet. A future backend mode could support local `ot-ctl`, SSH, or REST-only operation.
-- OTBR RX/TX history is border-router traffic, not a full Thread radio sniffer.
-- Multi-hop paths for sleepy/end devices are inferred when available, not directly packet-captured.
-- Matter/Home Assistant integration is optional; without it, nodes may show Thread IDs until aliases are added.
+- OTBR access currently expects a Dockerized OTBR container and uses `docker exec <OTBR_CONTAINER> ot-ctl`.
+- Bare-metal OTBR, SSH, and REST-only modes are not first-class backends yet.
+- OTBR RX/TX history only reports traffic observed by the border router.
+- Matter and Home Assistant integrations are optional; without them, nodes may display Thread IDs until aliases are added.
 
 ## Troubleshooting
 
-### No Data From OTBR
-
-Check REST:
+Check OTBR REST:
 
 ```bash
 curl http://127.0.0.1:8981/node
 ```
 
-Check `ot-ctl` inside the OTBR container:
+Check `ot-ctl` in the OTBR container:
 
 ```bash
 docker exec otbr ot-ctl state
@@ -255,59 +279,37 @@ docker exec otbr ot-ctl router table
 docker exec otbr ot-ctl child table
 ```
 
-### Friendly Names Missing
-
-Check Home Assistant storage mount:
-
-```bash
-docker compose exec better-otbr-ha-dashboard ls -l /ha-storage
-```
-
-Check Matter websocket:
-
-```bash
-docker compose logs better-otbr-ha-dashboard | grep 'matter ip lookup'
-```
-
-### Nodes Or Links Flicker
-
-Increase:
-
-```env
-TOPOLOGY_LINK_TTL=10m
-```
-
-Then recreate:
-
-```bash
-docker compose up -d --build --force-recreate
-```
-
-### Dashboard Does Not Update
-
-Check logs:
+Check dashboard logs:
 
 ```bash
 docker compose logs -f better-otbr-ha-dashboard
 ```
 
-Check the browser network tab for `/api/events`.
+If topology appears stale or flickers, increase the retention windows:
+
+```env
+TOPOLOGY_NODE_TTL=3m
+TOPOLOGY_LINK_TTL=10m
+```
 
 ## Development
-
-Run locally:
 
 ```bash
 go test ./...
 go run .
 ```
 
-The frontend is static HTML/CSS/JS under `static/`.
+Frontend assets are in `static/`.
+
+## Release
+
+This project uses Git tags for releases.
+
+```bash
+git tag v0.2.0
+git push origin main v0.2.0
+```
 
 ## License
 
-This project is distributed under the GNU General Public License version 3.0 with Additional Terms prohibiting use for AI/ML training.
-
-- `LICENSE`: GNU GPLv3 license text
-- `LICENSE-ADDITIONAL-TERMS.md`: Additional Terms, including the no-AI-training restriction
-- `NOTICE`: copyright, creator, and license summary
+See `LICENSE`, `LICENSE-ADDITIONAL-TERMS.md`, and `NOTICE`.
