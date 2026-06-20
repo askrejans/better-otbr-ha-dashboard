@@ -13,6 +13,7 @@ Self-hosted live dashboard for Dockerized OpenThread Border Router networks, bui
 - User-arranged graph layout persisted in browser storage
 - Fit, pan, and zoom controls
 - Home Assistant Matter device names from `.storage/core.device_registry`
+- Matter inventory nodes for known HA devices missing from live OTBR tables
 - Matter IP enrichment from python-matter-server websocket
 - Matter Thread Diagnostics links from python-matter-server data
 - Manual aliases, notes, and sticky discovered names

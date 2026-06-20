@@ -213,6 +213,7 @@ function matchMatterNode(n, devices) {
 }
 function matterMatchScore(n, d, mac=String(n.extMac || '').toLowerCase(), ip=String(n.threadIp || '').toLowerCase(), label=normName(n.label)) {
   let score = 0;
+  if (String(n.id || '') === `matter-${canonMatterId(d.nodeId)}`) score = Math.max(score, 98);
   if (d.extMac && String(d.extMac).toLowerCase() === mac) score = Math.max(score, 100);
   if (d.threadIp && String(d.threadIp).toLowerCase() === ip) score = Math.max(score, 95);
   if (label && label === normName(d.name)) score = Math.max(score, 82);
@@ -222,6 +223,7 @@ function matterMatchScore(n, d, mac=String(n.extMac || '').toLowerCase(), ip=Str
   return score;
 }
 function matterMatchSource(n, d) {
+  if (String(n.id || '') === `matter-${canonMatterId(d.nodeId)}`) return 'Matter inventory';
   if (d.extMac && String(d.extMac).toLowerCase() === String(n.extMac || '').toLowerCase()) return 'MAC match';
   if (d.threadIp && String(d.threadIp).toLowerCase() === String(n.threadIp || '').toLowerCase()) return 'IP match';
   if (normName(n.label) === normName(d.name)) return 'Name match';

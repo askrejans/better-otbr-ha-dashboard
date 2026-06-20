@@ -446,16 +446,16 @@ func TestParseTrafficMatchesMatterIPWhenTopologyMissing(t *testing.T) {
 	tx := strings.Join([]string{
 		"00:00:01.000",
 		"type:UDP len:50 to:0x1234",
-		"dst:[fd54:8eb2:42c0:1:20fe:c9a4:37c4:a9ca]:5540",
+		"dst:[fd00:db8:1234:1:20fe:c9a4:37c4:a9ca]:5540",
 	}, "\n")
-	matter := []MatterDevice{{NodeID: "D", Name: "Šķūņa gaismas", ThreadIP: "fd54:8eb2:42c0:1:20fe:c9a4:37c4:a9ca"}}
+	matter := []MatterDevice{{NodeID: "D", Name: "Detached Switch", ThreadIP: "fd00:db8:1234:1:20fe:c9a4:37c4:a9ca"}}
 
 	events := parseTraffic("", tx, nil, matter)
 	if len(events) != 1 {
 		t.Fatalf("events = %d, want 1", len(events))
 	}
-	if events[0].Note != "Šķūņa gaismas" {
-		t.Fatalf("note = %q, want Šķūņa gaismas", events[0].Note)
+	if events[0].Note != "Detached Switch" {
+		t.Fatalf("note = %q, want Detached Switch", events[0].Note)
 	}
 	if events[0].Peer != "matter-D" {
 		t.Fatalf("peer = %q, want matter-D", events[0].Peer)
@@ -468,12 +468,12 @@ func TestAddTrafficObservedNodesPromotesMatterTrafficPeer(t *testing.T) {
 	events := []TrafficEvent{{
 		Direction: "tx",
 		Peer:      "matter-D",
-		Note:      "Šķūņa gaismas",
-		Dst:       "fd54:8eb2:42c0:1:20fe:c9a4:37c4:a9ca:5540",
+		Note:      "Detached Switch",
+		Dst:       "fd00:db8:1234:1:20fe:c9a4:37c4:a9ca:5540",
 		Type:      "UDP",
 		Bytes:     50,
 	}}
-	matter := []MatterDevice{{NodeID: "D", Name: "Šķūņa gaismas", ThreadIP: "fd54:8eb2:42c0:1:20fe:c9a4:37c4:a9ca"}}
+	matter := []MatterDevice{{NodeID: "D", Name: "Detached Switch", ThreadIP: "fd00:db8:1234:1:20fe:c9a4:37c4:a9ca"}}
 
 	gotNodes, gotLinks := addTrafficObservedNodes(nodes, links, events, matter)
 
@@ -486,10 +486,10 @@ func TestAddTrafficObservedNodesPromotesMatterTrafficPeer(t *testing.T) {
 	if observed.ID == "" {
 		t.Fatalf("missing observed Matter node: %#v", gotNodes)
 	}
-	if observed.Label != "Šķūņa gaismas" {
-		t.Fatalf("label = %q, want Šķūņa gaismas", observed.Label)
+	if observed.Label != "Detached Switch" {
+		t.Fatalf("label = %q, want Detached Switch", observed.Label)
 	}
-	if observed.ThreadIP != "fd54:8eb2:42c0:1:20fe:c9a4:37c4:a9ca" {
+	if observed.ThreadIP != "fd00:db8:1234:1:20fe:c9a4:37c4:a9ca" {
 		t.Fatalf("ThreadIP = %q", observed.ThreadIP)
 	}
 	if observed.LinkStatus != "traffic-seen" {
@@ -520,5 +520,59 @@ func TestAddTrafficObservedNodesPromotesUnknownRLOC(t *testing.T) {
 	}
 	if len(gotLinks) != 1 || gotLinks[0].RSSI != -79 {
 		t.Fatalf("links = %#v", gotLinks)
+	}
+}
+
+func TestAddMatterInventoryNodesAddsUnmatchedMatterDevices(t *testing.T) {
+	nodes := []GraphNode{{ID: "otbr", Label: "OTBR", Kind: "border-router"}}
+	matter := []MatterDevice{
+		{NodeID: "1", Name: "Window Sensor", ThreadIP: "fd00:db8::1"},
+		{NodeID: "D", Name: "Detached Switch"},
+		{NodeID: "20", Name: "Air Quality Monitor"},
+	}
+
+	gotNodes, gotLinks := addMatterInventoryNodes(nodes, nil, matter)
+
+	byID := map[string]GraphNode{}
+	for _, n := range gotNodes {
+		byID[n.ID] = n
+	}
+	if byID["matter-1"].Label != "Window Sensor" || byID["matter-1"].ThreadIP != "fd00:db8::1" {
+		t.Fatalf("matter-1 = %#v", byID["matter-1"])
+	}
+	if byID["matter-D"].Label != "Detached Switch" || byID["matter-D"].LinkStatus != "matter-known" {
+		t.Fatalf("matter-D = %#v", byID["matter-D"])
+	}
+	if byID["matter-20"].Label != "Air Quality Monitor" {
+		t.Fatalf("matter-20 = %#v", byID["matter-20"])
+	}
+	if _, ok := byID["matter-14"]; ok {
+		t.Fatalf("hex Matter node id 20 was treated as decimal 20: %#v", byID["matter-14"])
+	}
+	if len(gotLinks) != 3 {
+		t.Fatalf("links = %d, want inventory links for all devices: %#v", len(gotLinks), gotLinks)
+	}
+}
+
+func TestAddMatterInventoryNodesRenamesTrafficNodeByIP(t *testing.T) {
+	nodes := []GraphNode{
+		{ID: "otbr", Label: "OTBR", Kind: "border-router"},
+		{ID: "0x5005", Label: "0x5005", Kind: "traffic", Rloc16: "0x5005", ThreadIP: "fd00:db8::abcd"},
+	}
+	matter := []MatterDevice{{NodeID: "2", Name: "Motion Sensor", ThreadIP: "fd00:db8::abcd"}}
+
+	gotNodes, gotLinks := addMatterInventoryNodes(nodes, nil, matter)
+
+	if len(gotNodes) != 2 {
+		t.Fatalf("nodes = %d, want existing traffic node renamed, not duplicated: %#v", len(gotNodes), gotNodes)
+	}
+	if gotNodes[1].Label != "Motion Sensor" {
+		t.Fatalf("label = %q, want Matter name", gotNodes[1].Label)
+	}
+	if gotNodes[1].LinkStatus != "matter-linked" {
+		t.Fatalf("LinkStatus = %q, want matter-linked", gotNodes[1].LinkStatus)
+	}
+	if len(gotLinks) != 0 {
+		t.Fatalf("links = %#v, want no inventory link for matched node", gotLinks)
 	}
 }

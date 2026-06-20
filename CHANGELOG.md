@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.3.0 - 2026-06-20
+
+### Added
+
+- Matter inventory nodes for Home Assistant Matter devices that are known but absent from the latest OTBR topology and traffic tables.
+- Traffic-observed nodes for peers seen in OTBR RX/TX history but missing from current neighbor or child tables.
+- Matter matching for inventory node IDs, traffic peer IPs, and existing traffic nodes.
+- Regression tests for Matter inventory visibility, traffic-only peers, and hex Matter node IDs.
+
+### Changed
+
+- Default tracked alias config is now generic sample data so releases do not ship deployment-specific device names.
+- Matter node ID handling now preserves Home Assistant registry IDs as hex while still parsing python-matter-server decimal IDs.
+
 ## v0.2.0 - 2026-06-10
 
 ### Added

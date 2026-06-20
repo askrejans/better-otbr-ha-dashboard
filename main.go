@@ -585,6 +585,7 @@ func (s *Server) refresh(ctx context.Context) error {
 		annotateTrafficPaths(traffic, nodes, links)
 		applyTraffic(&links, traffic)
 	}
+	nodes, links = addMatterInventoryNodes(nodes, links, matter)
 	if !s.cfg.IncludeRaw {
 		delete(raw, "rx")
 		delete(raw, "tx")
@@ -1123,7 +1124,7 @@ func parseRouterHints(files []matterFile, matter []MatterDevice) map[string]Rout
 	}
 	nameByNode := map[string]MatterDevice{}
 	for _, d := range matter {
-		nameByNode[strings.ToUpper(strings.TrimLeft(d.NodeID, "0"))] = d
+		nameByNode[canonicalMatterDeviceID(d.NodeID)] = d
 	}
 	for _, file := range files {
 		base := filepath.Base(file.path)
@@ -1199,12 +1200,12 @@ func parseMatterNeighborLinks(files []matterFile, matter []MatterDevice, nodes [
 			nodeByLabel[n.Label] = n.ID
 		}
 		if linked := matchMatter(&n, matter); linked != nil {
-			nodeByMatter[canonicalMatterNodeID(linked.NodeID)] = n.ID
+			nodeByMatter[canonicalMatterDeviceID(linked.NodeID)] = n.ID
 		}
 	}
 	for _, d := range matter {
-		if nodeByMatter[canonicalMatterNodeID(d.NodeID)] == "" && d.Name != "" {
-			nodeByMatter[canonicalMatterNodeID(d.NodeID)] = nodeByLabel[d.Name]
+		if nodeByMatter[canonicalMatterDeviceID(d.NodeID)] == "" && d.Name != "" {
+			nodeByMatter[canonicalMatterDeviceID(d.NodeID)] = nodeByLabel[d.Name]
 		}
 	}
 	best := map[string]GraphLink{}
@@ -1317,6 +1318,16 @@ func canonicalMatterNodeID(id string) string {
 	if v, err := strconv.ParseUint(id, 10, 64); err == nil {
 		return strings.ToUpper(strconv.FormatUint(v, 16))
 	}
+	id = strings.TrimPrefix(strings.TrimPrefix(id, "0x"), "0X")
+	id = strings.TrimLeft(id, "0")
+	if id == "" {
+		id = "0"
+	}
+	return strings.ToUpper(id)
+}
+
+func canonicalMatterDeviceID(id string) string {
+	id = strings.TrimSpace(id)
 	id = strings.TrimPrefix(strings.TrimPrefix(id, "0x"), "0X")
 	id = strings.TrimLeft(id, "0")
 	if id == "" {
@@ -1759,7 +1770,7 @@ func addTrafficObservedNodes(nodes []GraphNode, links []GraphLink, events []Traf
 	}
 	matterByPeer := map[string]MatterDevice{}
 	for _, d := range matter {
-		id := "matter-" + canonicalMatterNodeID(d.NodeID)
+		id := "matter-" + canonicalMatterDeviceID(d.NodeID)
 		matterByPeer[id] = d
 	}
 	for _, ev := range events {
@@ -1803,6 +1814,73 @@ func addTrafficObservedNodes(nodes []GraphNode, links []GraphLink, events []Traf
 		return nodeSortKey(nodes[i]) < nodeSortKey(nodes[j])
 	})
 	return nodes, links
+}
+
+func addMatterInventoryNodes(nodes []GraphNode, links []GraphLink, matter []MatterDevice) ([]GraphNode, []GraphLink) {
+	if len(matter) == 0 {
+		return nodes, links
+	}
+	linkKeys := map[string]bool{}
+	for _, l := range links {
+		linkKeys[orderedLinkKey(l.Source, l.Target)] = true
+	}
+	for _, d := range matter {
+		if d.NodeID == "" {
+			continue
+		}
+		if idx := findMatterGraphNode(nodes, d); idx >= 0 {
+			if nodes[idx].Label == "" || nodes[idx].Label == nodes[idx].ID || strings.HasPrefix(nodes[idx].Label, "0x") {
+				nodes[idx].Label = d.Name
+				nodes[idx].Alias = true
+				nodes[idx].MatterGuess = "Linked from Home Assistant/Matter inventory"
+				nodes[idx].LinkStatus = "matter-linked"
+			}
+			if nodes[idx].ThreadIP == "" {
+				nodes[idx].ThreadIP = d.ThreadIP
+			}
+			continue
+		}
+		id := "matter-" + canonicalMatterDeviceID(d.NodeID)
+		n := GraphNode{
+			ID:          id,
+			Label:       d.Name,
+			Kind:        "matter",
+			Role:        "known",
+			ThreadIP:    d.ThreadIP,
+			Note:        "Known Home Assistant Matter device; not present in latest OTBR topology or traffic tables",
+			Alias:       true,
+			MatterGuess: "Added from Home Assistant/Matter inventory",
+			LinkStatus:  "matter-known",
+		}
+		nodes = append(nodes, n)
+		key := orderedLinkKey("otbr", id)
+		if !linkKeys[key] {
+			links = append(links, GraphLink{Source: "otbr", Target: id, Kind: "inventory"})
+			linkKeys[key] = true
+		}
+	}
+	sort.SliceStable(nodes, func(i, j int) bool {
+		return nodeSortKey(nodes[i]) < nodeSortKey(nodes[j])
+	})
+	return nodes, links
+}
+
+func findMatterGraphNode(nodes []GraphNode, d MatterDevice) int {
+	matterID := "matter-" + canonicalMatterDeviceID(d.NodeID)
+	deviceIP := strings.ToLower(strings.TrimSpace(d.ThreadIP))
+	deviceName := strings.ToLower(strings.TrimSpace(d.Name))
+	for i, n := range nodes {
+		if n.ID == matterID {
+			return i
+		}
+		if deviceIP != "" && strings.ToLower(strings.TrimSpace(n.ThreadIP)) == deviceIP {
+			return i
+		}
+		if deviceName != "" && strings.ToLower(strings.TrimSpace(n.Label)) == deviceName {
+			return i
+		}
+	}
+	return -1
 }
 
 func trafficPeerRLOC(peer string) string {
@@ -1878,7 +1956,7 @@ func parseTrafficBlock(out, dir string, byRloc map[string]GraphNode, byIP map[st
 				ev.Note = n.Label
 			} else if d, ok := matterByIP[strings.ToLower(m[1])]; ok && ev.Note == "" {
 				ev.Note = d.Name
-				ev.Peer = "matter-" + canonicalMatterNodeID(d.NodeID)
+				ev.Peer = "matter-" + canonicalMatterDeviceID(d.NodeID)
 			}
 			continue
 		}
@@ -1888,7 +1966,7 @@ func parseTrafficBlock(out, dir string, byRloc map[string]GraphNode, byIP map[st
 				ev.Note = n.Label
 			} else if d, ok := matterByIP[strings.ToLower(m[1])]; ok && ev.Note == "" {
 				ev.Note = d.Name
-				ev.Peer = "matter-" + canonicalMatterNodeID(d.NodeID)
+				ev.Peer = "matter-" + canonicalMatterDeviceID(d.NodeID)
 			}
 		}
 	}
