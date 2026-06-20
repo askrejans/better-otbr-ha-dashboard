@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -549,6 +550,7 @@ func (s *Server) refresh(ctx context.Context) error {
 		s.refreshState.lastSlow = now
 		mark("matter", step)
 	}
+	matter = enrichMatterThreadIdentities(s.refreshState.matterFiles, matter)
 
 	step = time.Now()
 	freshRaw, warnings := s.runOTCtlCommands(ctx, warnings, slow, trafficDue)
@@ -1115,6 +1117,121 @@ func (w *wsConn) readText() ([]byte, error) {
 
 func readRouterHints(dataDir string, matter []MatterDevice) map[string]RouterHint {
 	return parseRouterHints(readMatterFiles(dataDir), matter)
+}
+
+func enrichMatterThreadIdentities(files []matterFile, matter []MatterDevice) []MatterDevice {
+	if len(files) == 0 || len(matter) == 0 {
+		return matter
+	}
+	ids := parseMatterThreadIdentities(files)
+	if len(ids) == 0 {
+		return matter
+	}
+	out := cloneMatterDevices(matter)
+	for i := range out {
+		id := ids[canonicalMatterDeviceID(out[i].NodeID)]
+		if id.ExtMAC != "" && out[i].ExtMAC == "" {
+			out[i].ExtMAC = id.ExtMAC
+		}
+		if id.ThreadIP != "" && out[i].ThreadIP == "" {
+			out[i].ThreadIP = id.ThreadIP
+		}
+	}
+	return out
+}
+
+type matterThreadIdentity struct {
+	ExtMAC   string
+	ThreadIP string
+}
+
+func parseMatterThreadIdentities(files []matterFile) map[string]matterThreadIdentity {
+	out := map[string]matterThreadIdentity{}
+	for _, file := range files {
+		base := filepath.Base(file.path)
+		if base == "chip.json" || strings.HasSuffix(base, ".backup") {
+			continue
+		}
+		var doc struct {
+			Nodes map[string]struct {
+				Attributes map[string]any `json:"attributes"`
+			} `json:"nodes"`
+		}
+		dec := json.NewDecoder(bytes.NewReader(file.data))
+		dec.UseNumber()
+		if dec.Decode(&doc) != nil {
+			continue
+		}
+		for nodeID, node := range doc.Nodes {
+			rows, _ := node.Attributes["0/51/0"].([]any)
+			id := matterThreadIdentity{}
+			for _, rowAny := range rows {
+				row, _ := rowAny.(map[string]any)
+				if len(row) == 0 {
+					continue
+				}
+				if ext := bytesHexFromAny(row["4"]); ext != "" {
+					id.ExtMAC = ext
+				}
+				if addrs, _ := row["6"].([]any); len(addrs) > 0 {
+					if ip := bestThreadIP(addrs); ip != "" {
+						id.ThreadIP = ip
+					}
+				}
+			}
+			if id.ExtMAC != "" || id.ThreadIP != "" {
+				out[canonicalMatterNodeID(nodeID)] = id
+			}
+		}
+	}
+	return out
+}
+
+func bestThreadIP(addrs []any) string {
+	var fallback string
+	for _, addr := range addrs {
+		ip := ipFromAny(addr)
+		if ip == "" {
+			continue
+		}
+		if fallback == "" {
+			fallback = ip
+		}
+		if strings.HasPrefix(ip, "fe80:") || strings.Contains(ip, ":ff:fe00:") || strings.Contains(ip, ":ff:fe00") {
+			continue
+		}
+		return ip
+	}
+	return fallback
+}
+
+func bytesHexFromAny(v any) string {
+	switch x := v.(type) {
+	case string:
+		b, err := base64.StdEncoding.DecodeString(x)
+		if err == nil && len(b) > 0 {
+			return fmt.Sprintf("%x", b)
+		}
+		return strings.ToLower(strings.TrimPrefix(x, "0x"))
+	case map[string]any:
+		if fmt.Sprint(x["__object__"]) == "Uint8Array" {
+			return strings.ToLower(fmt.Sprint(x["__value__"]))
+		}
+	}
+	return ""
+}
+
+func ipFromAny(v any) string {
+	hexText := bytesHexFromAny(v)
+	if len(hexText) != 32 {
+		return ""
+	}
+	b, err := hex.DecodeString(hexText)
+	if err != nil || len(b) != 16 {
+		return ""
+	}
+	ip := net.IP(b)
+	return strings.ToLower(ip.String())
 }
 
 func parseRouterHints(files []matterFile, matter []MatterDevice) map[string]RouterHint {

@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.3.1 - 2026-06-20
+
+### Added
+
+- Matter Thread identity enrichment from python-matter-server Network Commissioning data, using device hardware address and Thread IPv6 addresses to name live topology nodes without relying only on sticky aliases.
+- README guidance for local aliases, sticky aliases, safe private config handling, and manual refresh after alias edits.
+
+### Fixed
+
+- Live routers can keep friendly names when Matter websocket IP lookup is incomplete and local sticky aliases are missing.
+- Inventory-only Matter nodes are less likely to duplicate real topology nodes when Matter diagnostics provide a stable ext MAC or Thread IP.
+
 ## v0.3.0 - 2026-06-20
 
 ### Added

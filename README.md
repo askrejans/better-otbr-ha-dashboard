@@ -15,7 +15,7 @@ Self-hosted live dashboard for Dockerized OpenThread Border Router networks, bui
 - Home Assistant Matter device names from `.storage/core.device_registry`
 - Matter inventory nodes for known HA devices missing from live OTBR tables
 - Matter IP enrichment from python-matter-server websocket
-- Matter Thread Diagnostics links from python-matter-server data
+- Matter Thread identity and diagnostics links from python-matter-server data
 - Manual aliases, notes, and sticky discovered names
 - Fast, slow, and idle refresh lanes
 - Shared backend refresh loop for all live clients
@@ -36,7 +36,7 @@ Self-hosted live dashboard for Dockerized OpenThread Border Router networks, bui
 | Docker API + `ot-ctl` | Counters, topology tables, router table, SRP hosts, RX/TX history |
 | Home Assistant `.storage/core.device_registry` | Matter names, models, manufacturers, area IDs |
 | python-matter-server websocket | Matter node Thread IP addresses |
-| python-matter-server data directory | Matter Thread Diagnostics route and neighbor observations |
+| python-matter-server data directory | Matter Thread hardware/IP identities, route tables, and neighbor observations |
 | `config/aliases.json` | Manual aliases, notes, sticky discovered names |
 
 ## Requirements
@@ -191,7 +191,15 @@ GOMEMLIMIT=64MiB
 
 ## Aliases
 
-`config/aliases.json`:
+Local aliases live in `config/aliases.json` on the host. The file is mounted into the container at `/config/aliases.json` and is intentionally ignored by git so household names and device labels stay local.
+
+Start from the generic example:
+
+```bash
+cp config/aliases.example.json config/aliases.json
+```
+
+Example:
 
 ```json
 {
@@ -212,7 +220,28 @@ Supported node keys:
 - Extended MAC
 - Dashboard node ID
 
-The dashboard may write discovered sticky names to `sticky`. Sticky names help prevent labels from flickering when live Matter IP data is temporarily stale.
+Recommended key order:
+
+- Use extended MAC when available, because it survives RLOC changes.
+- Use RLOC16 only for quick temporary naming.
+- Use dashboard node ID when it is already an extended MAC or stable `matter-*` ID.
+
+The dashboard may write discovered sticky names to `sticky`. Sticky names help prevent labels from flickering when live Matter IP data is temporarily stale or when OTBR misses a poll.
+
+After editing aliases, either wait for `METADATA_CACHE_TTL` to expire or click **Refresh** in the UI:
+
+```bash
+curl http://SERVER_IP:8888/api/refresh
+```
+
+If you want to reset only local learned names, stop the service and edit or remove the `sticky` object in `config/aliases.json`. Do not commit this file if it contains private room names or device labels.
+
+Automatic name sources are applied in this order:
+
+- Manual alias from `nodes`
+- Sticky alias from previous exact matches
+- Exact Matter match by ext MAC or Thread IP
+- Matter inventory fallback for known HA Matter devices not visible in OTBR topology
 
 ## Graph
 

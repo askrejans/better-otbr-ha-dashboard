@@ -576,3 +576,54 @@ func TestAddMatterInventoryNodesRenamesTrafficNodeByIP(t *testing.T) {
 		t.Fatalf("links = %#v, want no inventory link for matched node", gotLinks)
 	}
 }
+
+func TestEnrichMatterThreadIdentitiesFromMatterFiles(t *testing.T) {
+	files := []matterFile{{
+		path: "matter.json",
+		data: []byte(`{
+			"nodes": {
+				"32": {
+					"attributes": {
+						"0/51/0": [{
+							"4": "ABEiM0RVZnc=",
+							"6": [
+								"/oAAAAAAAAAAESIzRFVmdw==",
+								"/QANuAAAAAAAAAAAAACrzQ=="
+							]
+						}]
+					}
+				}
+			}
+		}`),
+	}}
+	matter := []MatterDevice{{NodeID: "20", Name: "Air Quality Monitor"}}
+
+	got := enrichMatterThreadIdentities(files, matter)
+
+	if got[0].ExtMAC != "0011223344556677" {
+		t.Fatalf("ExtMAC = %q, want decoded hardware address", got[0].ExtMAC)
+	}
+	if got[0].ThreadIP != "fd00:db8::abcd" {
+		t.Fatalf("ThreadIP = %q, want preferred non-link-local IPv6", got[0].ThreadIP)
+	}
+}
+
+func TestBuildGraphNamesRouterFromMatterThreadIdentity(t *testing.T) {
+	neighbor := "| R | 0x2400 | 1 | -50 | -51 | 3 | - | - | 0011223344556677 | 4 |"
+	matter := []MatterDevice{{NodeID: "20", Name: "Air Quality Monitor", ExtMAC: "0011223344556677"}}
+
+	nodes, _, _ := buildGraph(nil, neighbor, "", "", "", AliasConfig{}, matter, nil, nil)
+
+	for _, n := range nodes {
+		if n.ExtMAC == "0011223344556677" {
+			if n.Label != "Air Quality Monitor" {
+				t.Fatalf("label = %q, want Matter name", n.Label)
+			}
+			if n.LinkStatus != "auto" {
+				t.Fatalf("LinkStatus = %q, want auto", n.LinkStatus)
+			}
+			return
+		}
+	}
+	t.Fatalf("router not found in nodes: %#v", nodes)
+}
