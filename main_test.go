@@ -627,3 +627,22 @@ func TestBuildGraphNamesRouterFromMatterThreadIdentity(t *testing.T) {
 	}
 	t.Fatalf("router not found in nodes: %#v", nodes)
 }
+
+func TestSaveAliasWritesPreferredStableKey(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "aliases.json")
+	s := NewServer(Config{AliasFile: path})
+	s.ss = Snapshot{Nodes: []GraphNode{{ID: "0011223344556677", Rloc16: "0x2400", ExtMAC: "0011223344556677", Label: "0x2400"}}}
+
+	key, label, err := s.saveAlias(AliasRequest{NodeID: "0011223344556677", Label: "Desk Lamp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if key != "0011223344556677" || label != "Desk Lamp" {
+		t.Fatalf("saveAlias = %q/%q, want stable ext MAC key and label", key, label)
+	}
+	aliases := readAliases(path)
+	if aliases.Nodes["0011223344556677"] != "Desk Lamp" {
+		t.Fatalf("alias file nodes = %#v", aliases.Nodes)
+	}
+}

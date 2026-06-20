@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.3.2 - 2026-06-20
+
+### Added
+
+- Selected-node alias editor in the UI, with Matter-name suggestions and immediate local alias save/refresh.
+- `/api/alias` endpoint for writing local aliases to the configured alias file.
+
+### Changed
+
+- Alias saves prefer stable extended MAC keys before transient RLOC keys.
+
 ## v0.3.1 - 2026-06-20
 
 ### Added

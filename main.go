@@ -177,6 +177,19 @@ type StickyName struct {
 	UpdatedAt string `json:"updatedAt,omitempty"`
 }
 
+type AliasRequest struct {
+	NodeID  string `json:"nodeId"`
+	Label   string `json:"label"`
+	Key     string `json:"key,omitempty"`
+	Comment string `json:"comment,omitempty"`
+}
+
+type AliasResponse struct {
+	OK    bool   `json:"ok"`
+	Key   string `json:"key"`
+	Label string `json:"label"`
+}
+
 type AliasConfig struct {
 	Nodes  map[string]string     `json:"nodes"`
 	Notes  map[string]string     `json:"notes"`
@@ -290,6 +303,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/snapshot", s.handleSnapshot)
 	mux.HandleFunc("/api/refresh", s.handleRefresh)
+	mux.HandleFunc("/api/alias", s.handleAlias)
 	mux.HandleFunc("/api/events", s.handleEvents)
 	mux.Handle("/", noCache(http.FileServer(http.Dir("/static"))))
 	log.Printf("better-otbr-ha-dashboard listening on %s", cfg.ListenAddr)
@@ -420,6 +434,28 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.handleSnapshot(w, r)
+}
+
+func (s *Server) handleAlias(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req AliasRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid alias request", http.StatusBadRequest)
+		return
+	}
+	key, label, err := s.saveAlias(req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := s.refresh(r.Context()); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, AliasResponse{OK: true, Key: key, Label: label})
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
@@ -787,6 +823,12 @@ func cloneGraphLinks(in []GraphLink) []GraphLink {
 	return out
 }
 
+func cloneGraphNodes(in []GraphNode) []GraphNode {
+	out := make([]GraphNode, len(in))
+	copy(out, in)
+	return out
+}
+
 func snapshotVersion(ss Snapshot) string {
 	ss.GeneratedAt = time.Time{}
 	ss.Version = ""
@@ -867,6 +909,82 @@ func readAliases(path string) AliasConfig {
 		a.Sticky = map[string]StickyName{}
 	}
 	return a
+}
+
+func (s *Server) saveAlias(req AliasRequest) (string, string, error) {
+	label := strings.TrimSpace(req.Label)
+	if label == "" {
+		return "", "", errors.New("alias label is required")
+	}
+	if req.NodeID == "" && req.Key == "" {
+		return "", "", errors.New("node id or alias key is required")
+	}
+	s.mu.RLock()
+	nodes := cloneGraphNodes(s.ss.Nodes)
+	s.mu.RUnlock()
+	key := strings.TrimSpace(req.Key)
+	if key == "" {
+		var node *GraphNode
+		for i := range nodes {
+			if nodes[i].ID == req.NodeID {
+				node = &nodes[i]
+				break
+			}
+		}
+		if node == nil {
+			return "", "", errors.New("node not found")
+		}
+		key = preferredAliasKey(*node)
+	}
+	if key == "" {
+		return "", "", errors.New("no stable alias key found")
+	}
+	aliases := readAliases(s.cfg.AliasFile)
+	if aliases.Nodes == nil {
+		aliases.Nodes = map[string]string{}
+	}
+	if aliases.Notes == nil {
+		aliases.Notes = map[string]string{}
+	}
+	if aliases.Sticky == nil {
+		aliases.Sticky = map[string]StickyName{}
+	}
+	aliases.Nodes[key] = label
+	if note := strings.TrimSpace(req.Comment); note != "" {
+		aliases.Notes[key] = note
+	}
+	if err := writeAliases(s.cfg.AliasFile, aliases); err != nil {
+		return "", "", err
+	}
+	s.invalidateAliasCache()
+	return key, label, nil
+}
+
+func preferredAliasKey(n GraphNode) string {
+	if n.ExtMAC != "" && n.ExtMAC != "-" {
+		return strings.ToLower(n.ExtMAC)
+	}
+	if n.ID != "" && !strings.HasPrefix(n.ID, "matter-") {
+		return strings.ToLower(n.ID)
+	}
+	if n.Rloc16 != "" {
+		return strings.ToLower(n.Rloc16)
+	}
+	return strings.ToLower(n.ID)
+}
+
+func writeAliases(path string, aliases AliasConfig) error {
+	if path == "" {
+		return errors.New("alias file path is not configured")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(aliases, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(b, '\n'), 0644)
 }
 
 func readMatterDevices(storage string) []MatterDevice {

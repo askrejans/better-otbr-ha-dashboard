@@ -16,7 +16,7 @@ Self-hosted live dashboard for Dockerized OpenThread Border Router networks, bui
 - Matter inventory nodes for known HA devices missing from live OTBR tables
 - Matter IP enrichment from python-matter-server websocket
 - Matter Thread identity and diagnostics links from python-matter-server data
-- Manual aliases, notes, and sticky discovered names
+- Manual aliases from config or selected-node UI, notes, and sticky discovered names
 - Fast, slow, and idle refresh lanes
 - Shared backend refresh loop for all live clients
 - Docker Compose deployment
@@ -27,6 +27,7 @@ Self-hosted live dashboard for Dockerized OpenThread Border Router networks, bui
 - Live topology graph with retained nodes, weak-link highlighting, and active traffic overlays
 - Collapsible status, health, Matter mapping, selected-node, and traffic panels
 - Local traffic inspector with pause, clear, search, and direction filters
+- Selected-node alias editor for naming unmapped routers directly from the graph
 
 ## Data Sources
 
@@ -228,7 +229,15 @@ Recommended key order:
 
 The dashboard may write discovered sticky names to `sticky`. Sticky names help prevent labels from flickering when live Matter IP data is temporarily stale or when OTBR misses a poll.
 
-After editing aliases, either wait for `METADATA_CACHE_TTL` to expire or click **Refresh** in the UI:
+### Naming From The UI
+
+Click a node in the graph, enter a friendly name in the **Alias** field, and press **Save**. The dashboard writes the alias to `config/aliases.json`, preferring the node extended MAC when available. That keeps the name stable even if Thread assigns a new RLOC16 later.
+
+The alias field offers known Matter names as suggestions, but you can type any local label. Saving refreshes the snapshot immediately.
+
+### Editing By Hand
+
+After editing aliases manually, either wait for `METADATA_CACHE_TTL` to expire or click **Refresh** in the UI:
 
 ```bash
 curl http://SERVER_IP:8888/api/refresh

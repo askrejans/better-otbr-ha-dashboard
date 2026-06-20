@@ -139,6 +139,7 @@ function warningSource(w) {
 
 function renderMatterMapping(s) {
   const devices = s.matterDevices || [];
+  renderAliasSuggestions(devices);
   const linkedByMatter = new Map();
   (s.nodes || []).forEach(n => {
     if (n.retained || n.linkStatus === 'stale') return;
@@ -190,6 +191,21 @@ function renderMatterMapping(s) {
     frag.appendChild(div);
   });
   $('matter').appendChild(frag);
+}
+
+function renderAliasSuggestions(devices) {
+  const list = $('alias-suggestions');
+  if (!list) return;
+  list.innerHTML = '';
+  const seen = new Set();
+  devices.forEach(d => {
+    const name = String(d.name || '').trim();
+    if (!name || seen.has(name)) return;
+    seen.add(name);
+    const option = document.createElement('option');
+    option.value = name;
+    list.appendChild(option);
+  });
 }
 
 function canonMatterId(id) {
@@ -589,7 +605,55 @@ function showSelected(n) {
   const recentHtml = recent.length ? `<br><br><strong>Recent traffic</strong><br>${recent.map(ev => `${esc(ev.pathText || ev.pathLabels?.join(' -> ') || ev.direction)}<br><span class="muted">${esc(ev.localTime || localTimeText((ev.eventAt || 0) * 1000))} · ${ev.bytes || 0} B · ${esc(ev.type || '-')}</span>`).join('<br>')}` : '';
   const stale = n.retained || n.linkStatus === 'stale';
   const status = stale ? `Stale, last seen ${n.lastSeenAgo ?? '-'}s ago` : 'Current';
-  $('selected').innerHTML = `<strong>${esc(n.label)}</strong><br>Status: ${esc(status)}<br>Kind: ${esc(n.kind)} / Role: ${esc(n.role || '-') }<br>RLOC16: ${esc(n.rloc16 || '-')}<br>Child ID: ${esc(n.threadChildId || '-')}<br>Ext MAC: ${esc(n.extMac || '-')}<br>SRP host: ${esc(n.srpHost || '-')}<br>Thread IP: ${esc(n.threadIp || '-')}<br>RSSI: ${stale ? 'last ' : ''}${n.rssi || '-'} / Last: ${n.lastRssi || '-'}<br>Link quality: ${stale ? 'last ' : ''}${n.lqi || '-'}<br>Age: ${n.age ?? '-'}s<br>Version: ${n.version || '-'}<br>Link: ${esc(n.linkStatus || '-')}<br>${n.note ? `<br><em>${esc(n.note)}</em>` : ''}${!stale && n.matterGuess ? `<br><span class="muted">${esc(n.matterGuess)}</span>` : ''}${recentHtml}`;
+  const aliasKey = preferredAliasKey(n);
+  $('selected').innerHTML = `<strong>${esc(n.label)}</strong><br>Status: ${esc(status)}<br>Kind: ${esc(n.kind)} / Role: ${esc(n.role || '-') }<br>RLOC16: ${esc(n.rloc16 || '-')}<br>Child ID: ${esc(n.threadChildId || '-')}<br>Ext MAC: ${esc(n.extMac || '-')}<br>SRP host: ${esc(n.srpHost || '-')}<br>Thread IP: ${esc(n.threadIp || '-')}<br>RSSI: ${stale ? 'last ' : ''}${n.rssi || '-'} / Last: ${n.lastRssi || '-'}<br>Link quality: ${stale ? 'last ' : ''}${n.lqi || '-'}<br>Age: ${n.age ?? '-'}s<br>Version: ${n.version || '-'}<br>Link: ${esc(n.linkStatus || '-')}<br>${n.note ? `<br><em>${esc(n.note)}</em>` : ''}${!stale && n.matterGuess ? `<br><span class="muted">${esc(n.matterGuess)}</span>` : ''}
+    <form id="alias-form" class="alias-form">
+      <label>Alias</label>
+      <div class="alias-row">
+        <input id="alias-label" type="text" list="alias-suggestions" value="${esc(n.label || '')}" placeholder="Friendly name">
+        <button id="alias-save" type="submit">Save</button>
+      </div>
+      <span id="alias-status" class="muted">Writes ${esc(aliasKey || 'selected node')} to local aliases.</span>
+    </form>${recentHtml}`;
+  $('alias-form')?.addEventListener('submit', ev => {
+    ev.preventDefault();
+    saveAlias(n);
+  });
+}
+
+function preferredAliasKey(n) {
+  if (n.extMac && n.extMac !== '-') return n.extMac.toLowerCase();
+  if (n.id && !String(n.id).startsWith('matter-')) return String(n.id).toLowerCase();
+  if (n.rloc16) return n.rloc16.toLowerCase();
+  return String(n.id || '').toLowerCase();
+}
+
+async function saveAlias(n) {
+  const input = $('alias-label');
+  const status = $('alias-status');
+  const button = $('alias-save');
+  const label = input?.value?.trim() || '';
+  if (!label) {
+    if (status) status.textContent = 'Alias label is required.';
+    return;
+  }
+  if (button) button.disabled = true;
+  if (status) status.textContent = 'Saving alias...';
+  try {
+    const res = await fetch('/api/alias', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nodeId: n.id, label })
+    });
+    if (!res.ok) throw new Error(await res.text() || `HTTP ${res.status}`);
+    const saved = await res.json();
+    if (status) status.textContent = `Saved ${saved.key || 'alias'}.`;
+    await load(true);
+  } catch (err) {
+    if (status) status.textContent = `Save failed: ${String(err.message || err).trim()}`;
+  } finally {
+    if (button) button.disabled = false;
+  }
 }
 function clearSelected() {
   selected = null;
