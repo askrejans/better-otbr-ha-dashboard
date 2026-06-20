@@ -581,6 +581,7 @@ func (s *Server) refresh(ctx context.Context) error {
 	if s.cfg.EnableTraffic {
 		traffic = parseTraffic(raw["rx"], raw["tx"], nodes, matter)
 		traffic = limitTrafficEvents(traffic, s.cfg.TrafficHistoryLimit)
+		nodes, links = addTrafficObservedNodes(nodes, links, traffic, matter)
 		annotateTrafficPaths(traffic, nodes, links)
 		applyTraffic(&links, traffic)
 	}
@@ -1742,6 +1743,94 @@ func limitTrafficEvents(events []TrafficEvent, limit int) []TrafficEvent {
 		return events
 	}
 	return append([]TrafficEvent(nil), events[:limit]...)
+}
+
+func addTrafficObservedNodes(nodes []GraphNode, links []GraphLink, events []TrafficEvent, matter []MatterDevice) ([]GraphNode, []GraphLink) {
+	if len(events) == 0 {
+		return nodes, links
+	}
+	nodeIDs := map[string]bool{}
+	for _, n := range nodes {
+		nodeIDs[n.ID] = true
+	}
+	linkKeys := map[string]bool{}
+	for _, l := range links {
+		linkKeys[orderedLinkKey(l.Source, l.Target)] = true
+	}
+	matterByPeer := map[string]MatterDevice{}
+	for _, d := range matter {
+		id := "matter-" + canonicalMatterNodeID(d.NodeID)
+		matterByPeer[id] = d
+	}
+	for _, ev := range events {
+		if ev.Peer == "" || nodeIDs[ev.Peer] {
+			continue
+		}
+		label := strings.TrimSpace(ev.Note)
+		threadIP := trafficPeerIP(ev)
+		if d, ok := matterByPeer[ev.Peer]; ok {
+			if label == "" {
+				label = d.Name
+			}
+			if threadIP == "" {
+				threadIP = d.ThreadIP
+			}
+		}
+		if label == "" {
+			label = ev.Peer
+		}
+		n := GraphNode{
+			ID:         ev.Peer,
+			Label:      label,
+			Kind:       "traffic",
+			Role:       "traffic",
+			Rloc16:     trafficPeerRLOC(ev.Peer),
+			ThreadIP:   threadIP,
+			RSSI:       ev.RSSI,
+			Note:       "Seen in OTBR traffic history; not present in the latest topology tables",
+			Alias:      label != ev.Peer,
+			LinkStatus: "traffic-seen",
+		}
+		nodes = append(nodes, n)
+		nodeIDs[n.ID] = true
+		key := orderedLinkKey("otbr", n.ID)
+		if !linkKeys[key] {
+			links = append(links, GraphLink{Source: "otbr", Target: n.ID, Kind: "observed", RSSI: ev.RSSI, ActiveBytes: ev.Bytes, ActivePackets: 1})
+			linkKeys[key] = true
+		}
+	}
+	sort.SliceStable(nodes, func(i, j int) bool {
+		return nodeSortKey(nodes[i]) < nodeSortKey(nodes[j])
+	})
+	return nodes, links
+}
+
+func trafficPeerRLOC(peer string) string {
+	if strings.HasPrefix(strings.ToLower(peer), "0x") {
+		return peer
+	}
+	return ""
+}
+
+func trafficPeerIP(ev TrafficEvent) string {
+	if ev.Direction == "rx" {
+		return endpointIP(ev.Src)
+	}
+	if ev.Direction == "tx" {
+		return endpointIP(ev.Dst)
+	}
+	return ""
+}
+
+func endpointIP(endpoint string) string {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		return ""
+	}
+	if i := strings.LastIndex(endpoint, ":"); i > 0 {
+		return strings.ToLower(endpoint[:i])
+	}
+	return strings.ToLower(endpoint)
 }
 
 func parseTrafficBlock(out, dir string, byRloc map[string]GraphNode, byIP map[string]GraphNode, matterByIP map[string]MatterDevice) []TrafficEvent {

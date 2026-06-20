@@ -461,3 +461,64 @@ func TestParseTrafficMatchesMatterIPWhenTopologyMissing(t *testing.T) {
 		t.Fatalf("peer = %q, want matter-D", events[0].Peer)
 	}
 }
+
+func TestAddTrafficObservedNodesPromotesMatterTrafficPeer(t *testing.T) {
+	nodes := []GraphNode{{ID: "otbr", Label: "OTBR", Kind: "border-router"}}
+	links := []GraphLink{}
+	events := []TrafficEvent{{
+		Direction: "tx",
+		Peer:      "matter-D",
+		Note:      "Šķūņa gaismas",
+		Dst:       "fd54:8eb2:42c0:1:20fe:c9a4:37c4:a9ca:5540",
+		Type:      "UDP",
+		Bytes:     50,
+	}}
+	matter := []MatterDevice{{NodeID: "D", Name: "Šķūņa gaismas", ThreadIP: "fd54:8eb2:42c0:1:20fe:c9a4:37c4:a9ca"}}
+
+	gotNodes, gotLinks := addTrafficObservedNodes(nodes, links, events, matter)
+
+	var observed GraphNode
+	for _, n := range gotNodes {
+		if n.ID == "matter-D" {
+			observed = n
+		}
+	}
+	if observed.ID == "" {
+		t.Fatalf("missing observed Matter node: %#v", gotNodes)
+	}
+	if observed.Label != "Šķūņa gaismas" {
+		t.Fatalf("label = %q, want Šķūņa gaismas", observed.Label)
+	}
+	if observed.ThreadIP != "fd54:8eb2:42c0:1:20fe:c9a4:37c4:a9ca" {
+		t.Fatalf("ThreadIP = %q", observed.ThreadIP)
+	}
+	if observed.LinkStatus != "traffic-seen" {
+		t.Fatalf("LinkStatus = %q, want traffic-seen", observed.LinkStatus)
+	}
+	if len(gotLinks) != 1 || gotLinks[0].Source != "otbr" || gotLinks[0].Target != "matter-D" {
+		t.Fatalf("links = %#v, want OTBR observed link", gotLinks)
+	}
+}
+
+func TestAddTrafficObservedNodesPromotesUnknownRLOC(t *testing.T) {
+	nodes := []GraphNode{{ID: "otbr", Label: "OTBR", Kind: "border-router"}}
+	events := []TrafficEvent{{Direction: "rx", Peer: "0x7400", Src: "fd00::1234:5540", RSSI: -79, Bytes: 42}}
+
+	gotNodes, gotLinks := addTrafficObservedNodes(nodes, nil, events, nil)
+
+	var observed GraphNode
+	for _, n := range gotNodes {
+		if n.ID == "0x7400" {
+			observed = n
+		}
+	}
+	if observed.Rloc16 != "0x7400" {
+		t.Fatalf("Rloc16 = %q, want 0x7400", observed.Rloc16)
+	}
+	if observed.ThreadIP != "fd00::1234" {
+		t.Fatalf("ThreadIP = %q, want fd00::1234", observed.ThreadIP)
+	}
+	if len(gotLinks) != 1 || gotLinks[0].RSSI != -79 {
+		t.Fatalf("links = %#v", gotLinks)
+	}
+}
